@@ -30,6 +30,7 @@ from ai_macro.adapters import (
     ScreenRecognitionAdapter,
     ScriptAdapter,
 )
+from ai_macro.gui import FriendlyUIPresenter
 from ai_macro.runner import AuditLogger, ExecutionJobContext, MacroRunner
 from ai_macro.runtime import (
     LocalBrowserDriver,
@@ -56,23 +57,8 @@ __all__ = [
     "ExecutionJobContext",
     "ExecutionStatus",
     "FailurePolicy",
+    "FriendlyUIPresenter",
     "LegacyStatusMapper",
-    "MacroExecutionReport",
-    "MacroGenerationPipeline",
-    "MacroRunner",
-    "MacroStep",
-    "MacroValidationError",
-    "MacroValidator",
-    "OperationResult",
-    "PhysicalInputAdapter",
-    "PostConditionResult",
-    "PostConditionSpec",
-    "RecordedEvent",
-    "RetryPolicy",
-    "ScreenRecognitionAdapter",
-    "ScriptAdapter",
-    "SideEffectLevel",
-    "ValueOrigin",
     "LocalBrowserDriver",
     "LocalExcelDriver",
     "LocalPhysicalInputDriver",

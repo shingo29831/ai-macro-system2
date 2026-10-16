@@ -11,6 +11,11 @@ from ai_macro.cli import (
     EXIT_VALIDATION_ERROR,
     run_cli,
 )
+from ai_macro.generator import MacroGenerationPipeline
+from ai_macro.gui import FriendlyUIPresenter
+from ai_macro.runner import ExecutionJobContext
+from ai_macro.runtime import build_default_runtime
+from ai_macro.validator import MacroValidationError
 
 
 class TestCLIAndRuntime(unittest.TestCase):
@@ -100,6 +105,45 @@ class TestCLIAndRuntime(unittest.TestCase):
             )
             self.assertEqual(code, EXIT_VALIDATION_ERROR)
             self.assertIn("REQ-AI-003", err_buf.getvalue())
+
+    def test_friendly_ui_presenter_translation_and_ai_approval_flow(self) -> None:
+        # 1. 非エンジニア向けプリセット入力からイベントを生成（未承認のAI提案）
+        ai_event = FriendlyUIPresenter.build_event_from_friendly_input(
+            index=1,
+            action_label="文字を入力する",
+            target_label="ログインID入力欄",
+            raw_value="tanaka_taro",
+            is_mandatory=True,
+            is_ai_suggested=True,
+            is_approved=False,
+        )
+        human_desc = FriendlyUIPresenter.describe_event_for_human(ai_event)
+        self.assertIn("ログインID入力欄", human_desc)
+        self.assertIn("tanaka_taro", human_desc)
+
+        pipeline = MacroGenerationPipeline()
+        ir = pipeline.build_workflow_ir(
+            "wf_friendly", pipeline.normalize_raw_events([ai_event])
+        )
+
+        # 未承認のAI提案はそのまま実行マクロ化しようとすると拒否され、わかりやすい日本語メッセージに変換される
+        with self.assertRaises(MacroValidationError) as ctx:
+            pipeline.generate_executable_macro("m_friendly", ir)
+        friendly_err = FriendlyUIPresenter.format_friendly_validation_error(ctx.exception)
+        self.assertIn("選択したAI提案を承認する", friendly_err)
+
+        # 2. ユーザーが承認ボタンを押した後の実行と日本語レポート出力
+        ai_event["metadata"]["human_approved"] = True
+        ir_approved = pipeline.build_workflow_ir(
+            "wf_friendly", pipeline.normalize_raw_events([ai_event])
+        )
+        macro = pipeline.generate_executable_macro("m_friendly", ir_approved)
+        bundle = build_default_runtime()
+        report = bundle.runner.run(macro, ExecutionJobContext("job_friendly"), ir_approved)
+
+        friendly_report_text = FriendlyUIPresenter.format_friendly_report(report)
+        self.assertIn("すべての作業が正しく完了しました", friendly_report_text)
+        self.assertIn("画面・ファイルに正しく反映されたことを確認済み", friendly_report_text)
 
 
 if __name__ == "__main__":
