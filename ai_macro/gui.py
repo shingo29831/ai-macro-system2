@@ -1,6 +1,7 @@
 """Module: @role: IT非熟練者向けに日常語・プリセット選択・ワンクリック承認・日本語レポートを提供する直感的GUI"""
 
 import json
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -718,40 +719,88 @@ class AIMacroGUIApp:
     def _run_current_macro(self) -> None:
         if not self._sync_macro_preview(silent=False) or self._current_macro is None:
             return
-        self._active_job = ExecutionJobContext(job_id="gui_job_001")
-        report = self._runtime_bundle.runner.run(
-            self._current_macro, self._active_job, self._current_ir
+
+        macro = self._current_macro
+        workflow_ir = self._current_ir
+        job = ExecutionJobContext(job_id="gui_job_001")
+        self._active_job = job
+        result: Dict[str, Any] = {}
+        finished = threading.Event()
+
+        self._set_banner(
+            "⏳ 作業を実行しています。必要な場合は「緊急ストップ」を押してください。",
+            "#e6f2ff",
+            "#004578",
         )
 
-        text, bg, fg = STATUS_BANNER_STYLES.get(
-            report.final_status,
-            (f"状態: {report.final_status.value}", "#f3f2f1", "#323130"),
-        )
-        self._set_banner(text, bg, fg)
+        def execute() -> None:
+            try:
+                result["report"] = self._runtime_bundle.runner.run(
+                    macro, job, workflow_ir
+                )
+            except Exception as exc:
+                result["error"] = exc
+            finally:
+                finished.set()
 
-        friendly_summary = FriendlyUIPresenter.format_friendly_report(report)
-        self._friendly_report_text.delete("1.0", tk.END)
-        self._friendly_report_text.insert(tk.END, friendly_summary)
+        def poll_result() -> None:
+            if not finished.is_set():
+                self.root.after(50, poll_result)
+                return
 
-        self._macro_text.delete("1.0", tk.END)
-        self._macro_text.insert(
-            tk.END,
-            json.dumps(
-                {
-                    "executable_macro": self._current_macro.to_dict(),
-                    "workflow_ir": self._current_ir.to_dict() if self._current_ir else None,
-                    "audit_logs": report.audit_logs,
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-        )
+            if self._active_job is job:
+                self._active_job = None
+
+            if "error" in result:
+                exc = result["error"]
+                self._set_banner(
+                    "❌ 実行中に予期しないエラーが発生しました。",
+                    "#fde7e9",
+                    "#a80000",
+                )
+                self._friendly_report_text.delete("1.0", tk.END)
+                self._friendly_report_text.insert(
+                    tk.END, f"実行エラー: {type(exc).__name__}: {exc}"
+                )
+                return
+
+            report = result["report"]
+            text, bg, fg = STATUS_BANNER_STYLES.get(
+                report.final_status,
+                (f"状態: {report.final_status.value}", "#f3f2f1", "#323130"),
+            )
+            self._set_banner(text, bg, fg)
+
+            friendly_summary = FriendlyUIPresenter.format_friendly_report(report)
+            self._friendly_report_text.delete("1.0", tk.END)
+            self._friendly_report_text.insert(tk.END, friendly_summary)
+
+            self._macro_text.delete("1.0", tk.END)
+            self._macro_text.insert(
+                tk.END,
+                json.dumps(
+                    {
+                        "executable_macro": macro.to_dict(),
+                        "workflow_ir": workflow_ir.to_dict() if workflow_ir else None,
+                        "audit_logs": report.audit_logs,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+        threading.Thread(target=execute, daemon=True).start()
+        self.root.after(50, poll_result)
 
     def _request_stop(self) -> None:
-        if self._active_job is not None:
-            self._active_job.request_stop()
-        text, bg, fg = STATUS_BANNER_STYLES[ExecutionStatus.STOPPED]
-        self._set_banner(text, bg, fg)
+        if self._active_job is None:
+            return
+        self._active_job.request_stop()
+        self._set_banner(
+            "⏹ 停止要求を受け付けました。実行結果を確認しています。",
+            "#fff4ce",
+            "#8a5700",
+        )
 
     def _save_macro_json(self) -> None:
         if not self._sync_macro_preview(silent=False):
@@ -763,8 +812,15 @@ class AIMacroGUIApp:
         )
         if not file_path:
             return
+        if self._current_macro is None:
+            return
         Path(file_path).write_text(
-            self._macro_text.get("1.0", tk.END), encoding="utf-8"
+            json.dumps(
+                self._current_macro.to_dict(),
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
         )
         messagebox.showinfo("保存完了", "作業ファイルを保存しました。")
 
