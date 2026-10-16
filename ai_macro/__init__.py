@@ -31,6 +31,16 @@ from ai_macro.adapters import (
     ScriptAdapter,
 )
 from ai_macro.runner import AuditLogger, ExecutionJobContext, MacroRunner
+from ai_macro.runtime import (
+    LocalBrowserDriver,
+    LocalExcelDriver,
+    LocalPhysicalInputDriver,
+    LocalScreenRecognizer,
+    LocalScriptRunner,
+    RuntimeBundle,
+    WorkspaceRuntimeState,
+    build_default_runtime,
+)
 
 __all__ = [
     "AIMode",
@@ -63,6 +73,14 @@ __all__ = [
     "ScriptAdapter",
     "SideEffectLevel",
     "ValueOrigin",
+    "LocalBrowserDriver",
+    "LocalExcelDriver",
+    "LocalPhysicalInputDriver",
+    "LocalScreenRecognizer",
+    "LocalScriptRunner",
+    "RuntimeBundle",
     "WorkflowIR",
     "WorkflowIRNode",
+    "WorkspaceRuntimeState",
+    "build_default_runtime",
 ]
