@@ -1,5 +1,3 @@
-namespace AI.MacroSystem.Application.Workflow.Validation;
-
 // @role: ワークフローIR検証の結果および成功時の不変Validated IRを保持するモデル
 namespace AI.MacroSystem.Application.Workflow.Validation;
 
