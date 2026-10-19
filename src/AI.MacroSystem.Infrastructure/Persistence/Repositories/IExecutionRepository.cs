@@ -9,8 +9,9 @@ public interface IExecutionRepository
     Task CreateExecutionAsync(ExecutionRecord execution, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
     Task<ExecutionRecord?> GetExecutionAsync(string executionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
 
-    Task UpdateExecutionStatusAndAppendEventAsync(
+    Task TransitionExecutionStatusAsync(
         string executionId,
+        ExecutionStatus expectedCurrentStatus,
         ExecutionStatus newStatus,
         DateTime? completedAtUtc,
         string? errorMessage,
@@ -20,6 +21,18 @@ public interface IExecutionRepository
 
     Task AddActionExecutionAsync(ActionExecutionRecord actionExecution, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
     Task UpdateActionExecutionAsync(ActionExecutionRecord actionExecution, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
+    Task TransitionActionExecutionStatusAsync(
+        string actionExecutionId,
+        ActionStatus expectedCurrentStatus,
+        ActionStatus newStatus,
+        string? resultJson,
+        string? errorMessage,
+        ActionErrorCategory errorCategory,
+        DateTime? completedAtUtc,
+        ExecutionEventRecord evt,
+        SqliteTransaction? transaction = null,
+        CancellationToken cancellationToken = default);
+    Task<ActionExecutionRecord?> GetActionExecutionAsync(string actionExecutionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<ActionExecutionRecord>> GetActionExecutionsAsync(string executionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<ExecutionEventRecord>> GetExecutionEventsAsync(string executionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default);

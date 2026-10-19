@@ -65,8 +65,9 @@ public sealed class ExecutionRepository : IExecutionRepository
             DateTime.Parse(reader.GetString(8), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
     }
 
-    public async Task UpdateExecutionStatusAndAppendEventAsync(
+    public async Task TransitionExecutionStatusAsync(
         string executionId,
+        ExecutionStatus expectedCurrentStatus,
         ExecutionStatus newStatus,
         DateTime? completedAtUtc,
         string? errorMessage,
@@ -80,6 +81,7 @@ public sealed class ExecutionRepository : IExecutionRepository
 
         try
         {
+            int rowsUpdated;
             await using (var updateCmd = conn.CreateCommand())
             {
                 updateCmd.Transaction = localTransaction;
@@ -88,12 +90,18 @@ public sealed class ExecutionRepository : IExecutionRepository
                     SET Status = @Status,
                         CompletedAtUtc = @CompletedAtUtc,
                         ErrorMessage = @ErrorMessage
-                    WHERE ExecutionId = @ExecutionId;";
+                    WHERE ExecutionId = @ExecutionId AND Status = @ExpectedStatus;";
                 updateCmd.Parameters.AddWithValue("@Status", newStatus.ToString());
                 updateCmd.Parameters.AddWithValue("@CompletedAtUtc", completedAtUtc.HasValue ? completedAtUtc.Value.ToString("o", CultureInfo.InvariantCulture) : DBNull.Value);
                 updateCmd.Parameters.AddWithValue("@ErrorMessage", (object?)errorMessage ?? DBNull.Value);
                 updateCmd.Parameters.AddWithValue("@ExecutionId", executionId);
-                await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+                updateCmd.Parameters.AddWithValue("@ExpectedStatus", expectedCurrentStatus.ToString());
+                rowsUpdated = await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (rowsUpdated == 0)
+            {
+                throw new ConcurrencyConflictException("Execution", executionId, expectedCurrentStatus.ToString());
             }
 
             await using (var eventCmd = conn.CreateCommand())
@@ -142,8 +150,8 @@ public sealed class ExecutionRepository : IExecutionRepository
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = transaction;
         cmd.CommandText = @"
-            INSERT INTO ActionExecutions (ActionExecutionId, ExecutionId, NodeId, ExecutionOrder, IterationIndex, ActionType, Status, ParametersJson, ResultJson, ErrorMessage, StartedAtUtc, CompletedAtUtc)
-            VALUES (@ActionExecutionId, @ExecutionId, @NodeId, @ExecutionOrder, @IterationIndex, @ActionType, @Status, @ParametersJson, @ResultJson, @ErrorMessage, @StartedAtUtc, @CompletedAtUtc);";
+            INSERT INTO ActionExecutions (ActionExecutionId, ExecutionId, NodeId, ExecutionOrder, IterationIndex, ActionType, Status, ParametersJson, ResultJson, ErrorMessage, ErrorCategory, StartedAtUtc, CompletedAtUtc)
+            VALUES (@ActionExecutionId, @ExecutionId, @NodeId, @ExecutionOrder, @IterationIndex, @ActionType, @Status, @ParametersJson, @ResultJson, @ErrorMessage, @ErrorCategory, @StartedAtUtc, @CompletedAtUtc);";
         cmd.Parameters.AddWithValue("@ActionExecutionId", actionExecution.ActionExecutionId);
         cmd.Parameters.AddWithValue("@ExecutionId", actionExecution.ExecutionId);
         cmd.Parameters.AddWithValue("@NodeId", actionExecution.NodeId);
@@ -154,6 +162,7 @@ public sealed class ExecutionRepository : IExecutionRepository
         cmd.Parameters.AddWithValue("@ParametersJson", actionExecution.ParametersJson);
         cmd.Parameters.AddWithValue("@ResultJson", (object?)actionExecution.ResultJson ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ErrorMessage", (object?)actionExecution.ErrorMessage ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ErrorCategory", actionExecution.ErrorCategory.ToString());
         cmd.Parameters.AddWithValue("@StartedAtUtc", actionExecution.StartedAtUtc.ToString("o", CultureInfo.InvariantCulture));
         cmd.Parameters.AddWithValue("@CompletedAtUtc", actionExecution.CompletedAtUtc.HasValue ? actionExecution.CompletedAtUtc.Value.ToString("o", CultureInfo.InvariantCulture) : DBNull.Value);
 
@@ -172,15 +181,132 @@ public sealed class ExecutionRepository : IExecutionRepository
             SET Status = @Status,
                 ResultJson = @ResultJson,
                 ErrorMessage = @ErrorMessage,
+                ErrorCategory = @ErrorCategory,
                 CompletedAtUtc = @CompletedAtUtc
             WHERE ActionExecutionId = @ActionExecutionId;";
         cmd.Parameters.AddWithValue("@Status", actionExecution.Status.ToString());
         cmd.Parameters.AddWithValue("@ResultJson", (object?)actionExecution.ResultJson ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ErrorMessage", (object?)actionExecution.ErrorMessage ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ErrorCategory", actionExecution.ErrorCategory.ToString());
         cmd.Parameters.AddWithValue("@CompletedAtUtc", actionExecution.CompletedAtUtc.HasValue ? actionExecution.CompletedAtUtc.Value.ToString("o", CultureInfo.InvariantCulture) : DBNull.Value);
         cmd.Parameters.AddWithValue("@ActionExecutionId", actionExecution.ActionExecutionId);
 
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task TransitionActionExecutionStatusAsync(
+        string actionExecutionId,
+        ActionStatus expectedCurrentStatus,
+        ActionStatus newStatus,
+        string? resultJson,
+        string? errorMessage,
+        ActionErrorCategory errorCategory,
+        DateTime? completedAtUtc,
+        ExecutionEventRecord evt,
+        SqliteTransaction? transaction = null,
+        CancellationToken cancellationToken = default)
+    {
+        var conn = transaction?.Connection ?? await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+        var ownsConnection = transaction is null;
+        var localTransaction = ownsConnection ? (SqliteTransaction)await conn.BeginTransactionAsync(cancellationToken) : transaction;
+
+        try
+        {
+            int rowsUpdated;
+            await using (var updateCmd = conn.CreateCommand())
+            {
+                updateCmd.Transaction = localTransaction;
+                updateCmd.CommandText = @"
+                    UPDATE ActionExecutions
+                    SET Status = @Status,
+                        ResultJson = @ResultJson,
+                        ErrorMessage = @ErrorMessage,
+                        ErrorCategory = @ErrorCategory,
+                        CompletedAtUtc = @CompletedAtUtc
+                    WHERE ActionExecutionId = @ActionExecutionId AND Status = @ExpectedStatus;";
+                updateCmd.Parameters.AddWithValue("@Status", newStatus.ToString());
+                updateCmd.Parameters.AddWithValue("@ResultJson", (object?)resultJson ?? DBNull.Value);
+                updateCmd.Parameters.AddWithValue("@ErrorMessage", (object?)errorMessage ?? DBNull.Value);
+                updateCmd.Parameters.AddWithValue("@ErrorCategory", errorCategory.ToString());
+                updateCmd.Parameters.AddWithValue("@CompletedAtUtc", completedAtUtc.HasValue ? completedAtUtc.Value.ToString("o", CultureInfo.InvariantCulture) : DBNull.Value);
+                updateCmd.Parameters.AddWithValue("@ActionExecutionId", actionExecutionId);
+                updateCmd.Parameters.AddWithValue("@ExpectedStatus", expectedCurrentStatus.ToString());
+                rowsUpdated = await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (rowsUpdated == 0)
+            {
+                throw new ConcurrencyConflictException("ActionExecution", actionExecutionId, expectedCurrentStatus.ToString());
+            }
+
+            await using (var eventCmd = conn.CreateCommand())
+            {
+                eventCmd.Transaction = localTransaction;
+                eventCmd.CommandText = @"
+                    INSERT INTO ExecutionEvents (EventId, ExecutionId, SequenceNumber, EventType, PayloadJson, TimestampUtc)
+                    VALUES (@EventId, @ExecutionId, @SequenceNumber, @EventType, @PayloadJson, @TimestampUtc);";
+                eventCmd.Parameters.AddWithValue("@EventId", evt.EventId);
+                eventCmd.Parameters.AddWithValue("@ExecutionId", evt.ExecutionId);
+                eventCmd.Parameters.AddWithValue("@SequenceNumber", evt.SequenceNumber);
+                eventCmd.Parameters.AddWithValue("@EventType", evt.EventType);
+                eventCmd.Parameters.AddWithValue("@PayloadJson", evt.PayloadJson);
+                eventCmd.Parameters.AddWithValue("@TimestampUtc", evt.TimestampUtc.ToString("o", CultureInfo.InvariantCulture));
+                await eventCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (ownsConnection && localTransaction != null)
+            {
+                await localTransaction.CommitAsync(cancellationToken);
+            }
+        }
+        catch
+        {
+            if (ownsConnection && localTransaction != null)
+            {
+                await localTransaction.RollbackAsync(cancellationToken);
+            }
+            throw;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                if (localTransaction != null) await localTransaction.DisposeAsync();
+                await conn.DisposeAsync();
+            }
+        }
+    }
+
+    public async Task<ActionExecutionRecord?> GetActionExecutionAsync(string actionExecutionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default)
+    {
+        var conn = transaction?.Connection ?? await _connectionFactory.CreateOpenConnectionAsync(cancellationToken);
+        await using var _ = transaction is null ? conn : null;
+
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = @"
+            SELECT ActionExecutionId, ExecutionId, NodeId, ExecutionOrder, IterationIndex, ActionType, Status, ParametersJson, ResultJson, ErrorMessage, ErrorCategory, StartedAtUtc, CompletedAtUtc
+            FROM ActionExecutions
+            WHERE ActionExecutionId = @ActionExecutionId;";
+        cmd.Parameters.AddWithValue("@ActionExecutionId", actionExecutionId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+
+        return new ActionExecutionRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetInt32(3),
+            reader.GetInt32(4),
+            reader.GetString(5),
+            Enum.Parse<ActionStatus>(reader.GetString(6)),
+            reader.GetString(7),
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.IsDBNull(9) ? null : reader.GetString(9),
+            Enum.Parse<ActionErrorCategory>(reader.GetString(10)),
+            DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+            reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind));
     }
 
     public async Task<IReadOnlyList<ActionExecutionRecord>> GetActionExecutionsAsync(string executionId, SqliteTransaction? transaction = null, CancellationToken cancellationToken = default)
@@ -191,7 +317,7 @@ public sealed class ExecutionRepository : IExecutionRepository
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = transaction;
         cmd.CommandText = @"
-            SELECT ActionExecutionId, ExecutionId, NodeId, ExecutionOrder, IterationIndex, ActionType, Status, ParametersJson, ResultJson, ErrorMessage, StartedAtUtc, CompletedAtUtc
+            SELECT ActionExecutionId, ExecutionId, NodeId, ExecutionOrder, IterationIndex, ActionType, Status, ParametersJson, ResultJson, ErrorMessage, ErrorCategory, StartedAtUtc, CompletedAtUtc
             FROM ActionExecutions
             WHERE ExecutionId = @ExecutionId
             ORDER BY ExecutionOrder ASC;";
@@ -208,12 +334,13 @@ public sealed class ExecutionRepository : IExecutionRepository
                 reader.GetInt32(3),
                 reader.GetInt32(4),
                 reader.GetString(5),
-                Enum.Parse<ExecutionStatus>(reader.GetString(6)),
+                Enum.Parse<ActionStatus>(reader.GetString(6)),
                 reader.GetString(7),
                 reader.IsDBNull(8) ? null : reader.GetString(8),
                 reader.IsDBNull(9) ? null : reader.GetString(9),
-                DateTime.Parse(reader.GetString(10), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                reader.IsDBNull(11) ? null : DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
+                Enum.Parse<ActionErrorCategory>(reader.GetString(10)),
+                DateTime.Parse(reader.GetString(11), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                reader.IsDBNull(12) ? null : DateTime.Parse(reader.GetString(12), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind)));
         }
 
         return list;

@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS ActionExecutions (
     ParametersJson TEXT NOT NULL,
     ResultJson TEXT,
     ErrorMessage TEXT,
+    ErrorCategory TEXT NOT NULL DEFAULT 'None',
     StartedAtUtc TEXT NOT NULL,
     CompletedAtUtc TEXT,
     FOREIGN KEY (ExecutionId) REFERENCES Executions(ExecutionId) ON DELETE CASCADE,

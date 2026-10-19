@@ -20,10 +20,11 @@ public sealed record ActionExecutionRecord(
     int ExecutionOrder,
     int IterationIndex,
     string ActionType,
-    ExecutionStatus Status,
+    ActionStatus Status,
     string ParametersJson,
     string? ResultJson,
     string? ErrorMessage,
+    ActionErrorCategory ErrorCategory,
     DateTime StartedAtUtc,
     DateTime? CompletedAtUtc);
 
