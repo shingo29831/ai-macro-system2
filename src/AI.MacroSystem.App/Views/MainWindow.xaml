@@ -1,0 +1,16 @@
+<Window x:Class="AI.MacroSystem.App.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:viewmodels="clr-namespace:AI.MacroSystem.App.ViewModels"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=viewmodels:MainWindowViewModel}"
+        Title="{Binding Title}" Height="450" Width="800">
+    <Grid>
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="{Binding Title}" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" Margin="0,0,0,10"/>
+            <TextBlock Text="{Binding StatusMessage}" FontSize="14" HorizontalAlignment="Center" Foreground="Gray"/>
+        </StackPanel>
+    </Grid>
+</Window>
