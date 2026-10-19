@@ -1,5 +1,6 @@
 namespace AI.MacroSystem.Infrastructure.Persistence;
 
+using System.Globalization;
 using System.Reflection;
 using Microsoft.Data.Sqlite;
 
@@ -40,7 +41,7 @@ public sealed class DatabaseMigrator
                     checkCmd.Transaction = transaction;
                     checkCmd.CommandText = "SELECT COUNT(1) FROM __SchemaMigrations WHERE Version = @Version;";
                     checkCmd.Parameters.AddWithValue("@Version", migration.Version);
-                    var count = Convert.ToInt64(await checkCmd.ExecuteScalarAsync(cancellationToken));
+                    var count = Convert.ToInt64(await checkCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
                     isApplied = count > 0;
                 }
 
@@ -76,7 +77,7 @@ public sealed class DatabaseMigrator
         }
     }
 
-    private static IReadOnlyList<(int Version, string Description, string SqlScript)> GetMigrationScripts()
+    private static List<(int Version, string Description, string SqlScript)> GetMigrationScripts()
     {
         var assembly = typeof(DatabaseMigrator).Assembly;
         var resourceNames = assembly.GetManifestResourceNames()
@@ -95,7 +96,7 @@ public sealed class DatabaseMigrator
 
             var fileName = resourceName.Split('.').Reverse().Skip(1).First();
             var parts = fileName.Split('_', 2);
-            var version = int.Parse(parts[0]);
+            var version = int.Parse(parts[0], CultureInfo.InvariantCulture);
             var desc = parts.Length > 1 ? parts[1] : fileName;
 
             list.Add((version, desc, sql));

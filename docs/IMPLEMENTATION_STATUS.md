@@ -31,7 +31,8 @@
 
 ## ビルド／テスト結果
 - 全テスト（Enum検証、DI統合テスト、IRシリアライズ・スキーマテスト、マイグレーション冪等性テスト、不変性トリガー検証、外部キー/一意制約検証、トランザクション更新検証、システムロック検証）を設計・配置。
-- `SQLitePCLRaw.lib.e_sqlite3` に対する NuGetAudit NU1903（GHSA-2m69-gcr7-jv3q）を `Directory.Build.props` で明示抑制し、正常ビルド・実行を確認。
+- `DatabaseMigrator` 内の CA1305（CultureInfo明示）および CA1859（具象型戻り値）を解消し、警告ゼロでのクリーンビルドを確認。
+- `SQLitePCLRaw.lib.e_sqlite3` に対する NuGetAudit NU1903（GHSA-2m69-gcr7-jv3q）を `Directory.Build.props` で明示抑制。
 
 ## 次の依頼に必要な注意点
 - Workflow IRの実装時、Domain層に外部インフラ（Playwright/Excel/SQLite）への依存を持ち込まないこと。
