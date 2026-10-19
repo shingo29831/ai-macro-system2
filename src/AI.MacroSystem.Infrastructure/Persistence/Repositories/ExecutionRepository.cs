@@ -2,6 +2,7 @@ namespace AI.MacroSystem.Infrastructure.Persistence.Repositories;
 
 using System.Globalization;
 using AI.MacroSystem.Domain.Enums;
+using AI.MacroSystem.Domain.Exceptions;
 using AI.MacroSystem.Domain.Models;
 using Microsoft.Data.Sqlite;
 
