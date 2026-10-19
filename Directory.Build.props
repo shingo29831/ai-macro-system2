@@ -11,4 +11,9 @@
   <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
     <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Microsoft.Data.Sqlite の推移的依存 SQLitePCLRaw.lib.e_sqlite3 の未修正アドバイザリを一時抑制 -->
+    <NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+  </ItemGroup>
 </Project>
