@@ -28,7 +28,7 @@
 | `Running` | `Paused` | `Pause` | `ExecutionPaused` | 一時停止要求の受領 |
 | `Running` | `Succeeded` | `CompleteSuccess` | `ExecutionSucceeded` | 全ノード正常終了 |
 | `Running` | `Failed` | `FailExecution` | `ExecutionFailed` | 致命的障害または回復不能エラー |
-| `Running` | `FaultUnknown` | `FaultUnknown` | `ExecutionFaultedUnknown` | 副作用成否不明またはプロセス切断 |
+| `Running` | `Unknown` | `FaultUnknown` | `ExecutionFaultedUnknown` | 副作用成否不明またはプロセス切断 |
 | `Running` | `Cancelled` | `Cancel` | `ExecutionCancelled` | 実行中中断要求 |
 | `Paused` | `Running` | `Resume` | `ExecutionResumed` | 一時停止からの再開 |
 | `Paused` | `Cancelled` | `Cancel` | `ExecutionCancelled` | 一時停止中キャンセル要求 |
@@ -46,7 +46,7 @@
 | `Running` | `Succeeded` | `CompleteSuccess` | `ActionSucceeded` | アクション試行の正常完了 |
 | `Running` | `Retrying` | `ScheduleRetry` | `ActionRetryScheduled` | 失敗検知かつ副作用安全・再試行上限未満 |
 | `Running` | `Failed` | `Fail` | `ActionFailed` | 失敗確定（上限到達または非再試行エラー） |
-| `Running` | `FaultUnknown` | `FaultUnknown` | `ActionFaultedUnknown` | 外部副作用成否不明状態の確定 |
+| `Running` | `Unknown` | `FaultUnknown` | `ActionFaultedUnknown` | 外部副作用成否不明状態の確定 |
 | `Running` | `Cancelled` | `Cancel` | `ActionCancelled` | アクション実行中の中断要求 |
 | `Retrying` | `Running` | `StartRetry` | `ActionRetrying` | 待機インターバル完了後の再試行開始 |
 | `Retrying` | `Failed` | `Fail` | `ActionFailed` | 再試行待機中の致命的障害または期限到達 |

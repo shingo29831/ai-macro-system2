@@ -28,7 +28,7 @@ public class ExecutionStateMachineTests
         { ExecutionStatus.Running, ExecutionStatus.Paused, ExecutionTrigger.Pause, "ExecutionPaused" },
         { ExecutionStatus.Running, ExecutionStatus.Succeeded, ExecutionTrigger.CompleteSuccess, "ExecutionSucceeded" },
         { ExecutionStatus.Running, ExecutionStatus.Failed, ExecutionTrigger.FailExecution, "ExecutionFailed" },
-        { ExecutionStatus.Running, ExecutionStatus.FaultUnknown, ExecutionTrigger.FaultUnknown, "ExecutionFaultedUnknown" },
+        { ExecutionStatus.Running, ExecutionStatus.Unknown, ExecutionTrigger.FaultUnknown, "ExecutionFaultedUnknown" },
         { ExecutionStatus.Running, ExecutionStatus.Cancelled, ExecutionTrigger.Cancel, "ExecutionCancelled" },
 
         { ExecutionStatus.Paused, ExecutionStatus.Running, ExecutionTrigger.Resume, "ExecutionResumed" },

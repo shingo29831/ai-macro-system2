@@ -28,7 +28,7 @@ public static class ActionStateMachine
         new(ActionStatus.Running, ActionStatus.Succeeded, ActionTrigger.CompleteSuccess, "ActionSucceeded", "アクション試行の正常完了"),
         new(ActionStatus.Running, ActionStatus.Retrying, ActionTrigger.ScheduleRetry, "ActionRetryScheduled", "失敗検知かつ副作用安全・再試行上限未満"),
         new(ActionStatus.Running, ActionStatus.Failed, ActionTrigger.Fail, "ActionFailed", "失敗確定（上限到達または非再試行エラー）"),
-        new(ActionStatus.Running, ActionStatus.FaultUnknown, ActionTrigger.FaultUnknown, "ActionFaultedUnknown", "副作用成否不明状態の確定"),
+        new(ActionStatus.Running, ActionStatus.Unknown, ActionTrigger.FaultUnknown, "ActionFaultedUnknown", "副作用成否不明状態の確定"),
         new(ActionStatus.Running, ActionStatus.Cancelled, ActionTrigger.Cancel, "ActionCancelled", "アクション実行中の中断要求"),
 
         new(ActionStatus.Retrying, ActionStatus.Running, ActionTrigger.StartRetry, "ActionRetrying", "待機インターバル完了後の再試行開始"),

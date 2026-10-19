@@ -39,7 +39,7 @@ public static class ExecutionStateMachine
         new(ExecutionStatus.Running, ExecutionStatus.Paused, ExecutionTrigger.Pause, "ExecutionPaused", "一時停止要求の受領"),
         new(ExecutionStatus.Running, ExecutionStatus.Succeeded, ExecutionTrigger.CompleteSuccess, "ExecutionSucceeded", "全ノード正常終了"),
         new(ExecutionStatus.Running, ExecutionStatus.Failed, ExecutionTrigger.FailExecution, "ExecutionFailed", "致命的障害または回復不能エラー"),
-        new(ExecutionStatus.Running, ExecutionStatus.FaultUnknown, ExecutionTrigger.FaultUnknown, "ExecutionFaultedUnknown", "副作用成否不明またはクラッシュ"),
+        new(ExecutionStatus.Running, ExecutionStatus.Unknown, ExecutionTrigger.FaultUnknown, "ExecutionFaultedUnknown", "副作用成否不明またはクラッシュ"),
         new(ExecutionStatus.Running, ExecutionStatus.Cancelled, ExecutionTrigger.Cancel, "ExecutionCancelled", "実行中中断要求"),
 
         new(ExecutionStatus.Paused, ExecutionStatus.Running, ExecutionTrigger.Resume, "ExecutionResumed", "一時停止からの再開"),

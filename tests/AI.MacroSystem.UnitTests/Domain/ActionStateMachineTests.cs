@@ -17,7 +17,7 @@ public class ActionStateMachineTests
         { ActionStatus.Running, ActionStatus.Succeeded, ActionTrigger.CompleteSuccess, "ActionSucceeded" },
         { ActionStatus.Running, ActionStatus.Retrying, ActionTrigger.ScheduleRetry, "ActionRetryScheduled" },
         { ActionStatus.Running, ActionStatus.Failed, ActionTrigger.Fail, "ActionFailed" },
-        { ActionStatus.Running, ActionStatus.FaultUnknown, ActionTrigger.FaultUnknown, "ActionFaultedUnknown" },
+        { ActionStatus.Running, ActionStatus.Unknown, ActionTrigger.FaultUnknown, "ActionFaultedUnknown" },
         { ActionStatus.Running, ActionStatus.Cancelled, ActionTrigger.Cancel, "ActionCancelled" },
 
         { ActionStatus.Retrying, ActionStatus.Running, ActionTrigger.StartRetry, "ActionRetrying" },
