@@ -6,31 +6,31 @@
 - ビルド設定の共通化（`Directory.Build.props`: Nullable, ImplicitUsings, TreatWarningsAsErrors, LangVersion）。
 - Central Package Management（`Directory.Packages.props`）によるNuGet依存バージョン一元管理。
 - WPFアプリケーション（`App.xaml`, `MainWindow.xaml`）の基盤構築、`Microsoft.Extensions.Hosting` によるDI統合、`CommunityToolkit.Mvvm` によるMVVM分離。
-- ドメイン列挙型（`SideEffectType`, `RiskLevel`）の配置。
+- ドメイン列挙型（`SideEffectType`, `RiskLevel`, `ExecutionStatus`, `ApprovalStatus`, `RecoveryStatus`）の配置。
 - **Workflow IR v0.7の定義**:
-  - ルートモデル（`schemaVersion`, `workflowId`, `version`, `root`）
-  - 構造化ノード（`Sequence`, `If`, `ForEach`, `While`, `Action`）
-  - 安全な型付き条件式ツリー（`Binary`, `Unary`, `Logical`, `Literal`, `Variable`）
-  - `IActionTypeRegistry` による専用型付きパラメータモデルの登録と強制
-  - `JsonSchema.Net` による JSON Schema Draft 2020-12 準拠のスキーマ定義（`schemas/v0.7/workflow-ir.schema.json`）
-  - `WorkflowIrJsonSerializer` による未知フィールド・未知ノード・未知アクション型の遮断
-  - フィクスチャおよびラウンドトリップ・契約テストの網羅
-- `docs/decisions/0002-workflow-ir-v07-schema-and-model.md` の作成。
+  - ルートモデル、制御構造ノード、型付き式ツリー、型付きアクション引数レジストリ、Draft 2020-12スキーマ検証、シリアライザ。
+- **初期SQLite永続化層（依頼3）**:
+  - DDLマイグレーションスクリプト（`001_InitialSchema.sql`）および埋め込みリソース管理による実行器 `DatabaseMigrator`。
+  - `Workflows`, `WorkflowVersions`, `WorkflowDrafts`, `Approvals`, `Executions`, `ActionExecutions`, `ExecutionEvents`, `RecoveryRecords`, `SystemLocks` の9テーブル構成。
+  - 正式バージョンの不変性保護トリガー（`BEFORE UPDATE/DELETE` での例外発生）配備。
+  - `ActionExecutions` の多重反復区別（`ExecutionOrder`, `IterationIndex`）による一意制約。
+  - `SqliteExceptionClassifier` によるエラー分類（外部キー違反、一意制約違反、トリガー違反、排他競合）。
+  - `IWorkflowRepository`, `IExecutionRepository`, `ISystemLockRepository` の実装および状態＋監査イベントのアトミック同時更新API。
+  - インメモリ分離によるマイグレーション・不変性・制約・トランザクション・ロック統合テストの配置。
+- `docs/decisions/0003-sqlite-persistence-and-immutability.md` の作成。
 
 ## 未完了事項（次の依頼への引き継ぎ）
 - ワークフローの構文・型・参照・副作用・リスク検証エンジン（セマンティック検証）。
 - PlaywrightおよびExcel Interop COMの具象アダプター実装。
-- 監査履歴・承認フローおよび実行エンジン（単一実行制御・復旧確認）。
-- SQLite永続化の実装。
+- 実行エンジン（Execution Engine）本体および復旧確認フローのオーケストレーション。
 
 ## 決定事項
-- DIコンテナとして `Microsoft.Extensions.Hosting` / `Microsoft.Extensions.DependencyInjection` を採用。
-- MVVMフレームワークとして `CommunityToolkit.Mvvm` を採用。
-- Workflow IR v0.7 において任意スクリプトの実行を禁止し、安全な式ツリーおよびループ制限（Whileの `maxIterations` 必須化）を強制。
-- JSON境界において未知プロパティ（`additionalProperties: false`, `UnmappedMemberHandling = Disallow`）を拒否。
+- 正式バージョンの不変性をRepository層のAPI設計に加え、SQLiteトリガーで物理的に強制。
+- 実行状態の更新と監査イベントログの追記を同一トランザクション内でアトミックに行う。
+- 単一実行排他制御および復旧確認待ちブロックを `SystemLocks` テーブルで永続管理。
 
 ## ビルド／テスト結果
-- 全テスト（Enum検証、DI統合テスト、IRシリアライズ往復テスト、スキーマ適合性検証テスト、不正例拒否テスト）を設計・配置。
+- 全テスト（Enum検証、DI統合テスト、IRシリアライズ・スキーマテスト、マイグレーション冪等性テスト、不変性トリガー検証、外部キー/一意制約検証、トランザクション更新検証、システムロック検証）を設計・配置。
 - 静的型解析および参照整合性を確認済み。
 
 ## 次の依頼に必要な注意点
