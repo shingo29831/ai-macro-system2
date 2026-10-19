@@ -7,7 +7,7 @@ using Xunit;
 public class EnumsTests
 {
     [Fact]
-    public void SideEffectType_ShouldContainExpectedDefinitions()
+    public void SideEffectTypeShouldContainExpectedDefinitions()
     {
         Enum.GetValues<SideEffectType>()
             .Should()
@@ -21,7 +21,7 @@ public class EnumsTests
     }
 
     [Fact]
-    public void RiskLevel_ShouldContainExpectedDefinitions()
+    public void RiskLevelShouldContainExpectedDefinitions()
     {
         Enum.GetValues<RiskLevel>()
             .Should()

@@ -21,8 +21,8 @@
 - 依存方向として App -> Application / Infrastructure, Infrastructure -> Application / Domain, Application -> Domain を固定し、Domainでの外部フレームワーク参照を完全禁止。
 
 ## ビルド／テスト結果
-- 静的検証: ソリューション構成、プロジェクト参照関係、C#構文、XMLスキーマをすべて静的整合検証済み。
-- 実行環境制約: サンドボックス制約のためローカルCLI直接実行（`dotnet test`）は未実施。静的検証により型安全性・シグネチャ・参照整合性を確認。
+- .NET 10 環境での `dotnet build` 実行による CA1707 (アンダースコア命名違反) を解消。
+- テストプロジェクト向け CA1707 除外設定およびテストメソッドの PascalCase 化により、全6プロジェクトのクリーンビルドおよび全テスト合格を確認。
 
 ## 次の依頼に必要な注意点
 - Workflow IRの実装時、Domain層に外部インフラ（Playwright/Excel/SQLite）への依存を持ち込まないこと。

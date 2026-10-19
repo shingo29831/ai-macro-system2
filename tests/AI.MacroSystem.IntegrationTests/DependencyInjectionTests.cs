@@ -10,7 +10,7 @@ using Xunit;
 public class DependencyInjectionTests
 {
     [Fact]
-    public void ServiceContainer_ShouldResolveRegisteredServicesAndViewModels()
+    public void ServiceContainerShouldResolveRegisteredServicesAndViewModels()
     {
         var services = new ServiceCollection();
 
