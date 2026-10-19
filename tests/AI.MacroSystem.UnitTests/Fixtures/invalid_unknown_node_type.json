@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "0.7",
+  "workflowId": "wf-invalid-node",
+  "version": 1,
+  "root": {
+    "kind": "CustomUnknownNode",
+    "nodeId": "unknown_1"
+  }
+}

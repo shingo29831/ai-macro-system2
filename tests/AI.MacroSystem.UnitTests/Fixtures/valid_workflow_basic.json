@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "0.7",
+  "workflowId": "wf-001",
+  "version": 1,
+  "name": "Basic Workflow",
+  "description": "Minimal valid workflow",
+  "root": {
+    "kind": "Sequence",
+    "nodeId": "seq_root",
+    "nodes": [
+      {
+        "kind": "Action",
+        "nodeId": "act_delay",
+        "actionType": "Delay",
+        "parameters": {
+          "milliseconds": 500
+        }
+      }
+    ]
+  }
+}

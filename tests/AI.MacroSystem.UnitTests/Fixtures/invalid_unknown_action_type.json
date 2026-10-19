@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "0.7",
+  "workflowId": "wf-invalid-action",
+  "version": 1,
+  "root": {
+    "kind": "Action",
+    "nodeId": "act_unknown",
+    "actionType": "ExecuteArbitraryShellCommand",
+    "parameters": {
+      "command": "calc.exe"
+    }
+  }
+}

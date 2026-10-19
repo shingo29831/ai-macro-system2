@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "0.7",
+  "workflowId": "wf-invalid-prop",
+  "version": 1,
+  "unexpectedField": "prohibited",
+  "root": {
+    "kind": "Sequence",
+    "nodeId": "seq_1",
+    "nodes": []
+  }
+}

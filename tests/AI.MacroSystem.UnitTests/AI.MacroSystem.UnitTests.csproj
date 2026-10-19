@@ -23,4 +23,10 @@
     <ProjectReference Include="..\..\src\AI.MacroSystem.Domain\AI.MacroSystem.Domain.csproj" />
     <ProjectReference Include="..\..\src\AI.MacroSystem.Application\AI.MacroSystem.Application.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Fixtures\**">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
 </Project>

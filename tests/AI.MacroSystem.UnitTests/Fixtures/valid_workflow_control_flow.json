@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "0.7",
+  "workflowId": "wf-002",
+  "version": 1,
+  "name": "Control Flow Workflow",
+  "description": "Workflow demonstrating If, ForEach, While, and expressions",
+  "root": {
+    "kind": "Sequence",
+    "nodeId": "seq_root",
+    "nodes": [
+      {
+        "kind": "If",
+        "nodeId": "if_1",
+        "condition": {
+          "kind": "Binary",
+          "operator": "Equal",
+          "left": {
+            "kind": "Variable",
+            "variableName": "status"
+          },
+          "right": {
+            "kind": "Literal",
+            "value": "ready"
+          }
+        },
+        "thenBranch": {
+          "kind": "Action",
+          "nodeId": "act_log",
+          "actionType": "Log",
+          "parameters": {
+            "message": "System is ready",
+            "level": "Info"
+          }
+        },
+        "elseBranch": {
+          "kind": "Action",
+          "nodeId": "act_log_warn",
+          "actionType": "Log",
+          "parameters": {
+            "message": "System is not ready",
+            "level": "Warning"
+          }
+        }
+      },
+      {
+        "kind": "While",
+        "nodeId": "while_1",
+        "maxIterations": 10,
+        "condition": {
+          "kind": "Unary",
+          "operator": "Not",
+          "operand": {
+            "kind": "Variable",
+            "variableName": "completed"
+          }
+        },
+        "body": {
+          "kind": "Action",
+          "nodeId": "act_delay_step",
+          "actionType": "Delay",
+          "parameters": {
+            "milliseconds": 100
+          }
+        }
+      },
+      {
+        "kind": "ForEach",
+        "nodeId": "foreach_1",
+        "itemVariable": "item",
+        "maxIterations": 50,
+        "source": {
+          "kind": "Variable",
+          "variableName": "items"
+        },
+        "body": {
+          "kind": "Action",
+          "nodeId": "act_nav",
+          "actionType": "WebNavigate",
+          "parameters": {
+            "url": "https://example.com"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-macrosystem.local/schemas/v0.7/workflow-ir.schema.json",
+  "title": "Workflow IR v0.7 Schema",
+  "type": "object",
+  "required": ["schemaVersion", "workflowId", "version", "root"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "0.7"
+    },
+    "workflowId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "root": {
+      "$ref": "#/$defs/workflowNode"
+    }
+  },
+  "$defs": {
+    "workflowNode": {
+      "oneOf": [
+        { "$ref": "#/$defs/sequenceNode" },
+        { "$ref": "#/$defs/ifNode" },
+        { "$ref": "#/$defs/forEachNode" },
+        { "$ref": "#/$defs/whileNode" },
+        { "$ref": "#/$defs/actionNode" }
+      ]
+    },
+    "sequenceNode": {
+      "type": "object",
+      "required": ["kind", "nodeId", "nodes"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Sequence" },
+        "nodeId": { "type": "string", "minLength": 1 },
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/workflowNode" }
+        }
+      }
+    },
+    "ifNode": {
+      "type": "object",
+      "required": ["kind", "nodeId", "condition", "thenBranch"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "If" },
+        "nodeId": { "type": "string", "minLength": 1 },
+        "condition": { "$ref": "#/$defs/conditionExpression" },
+        "thenBranch": { "$ref": "#/$defs/workflowNode" },
+        "elseBranch": { "$ref": "#/$defs/workflowNode" }
+      }
+    },
+    "forEachNode": {
+      "type": "object",
+      "required": ["kind", "nodeId", "itemVariable", "source", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "ForEach" },
+        "nodeId": { "type": "string", "minLength": 1 },
+        "itemVariable": { "type": "string", "minLength": 1 },
+        "source": { "$ref": "#/$defs/expression" },
+        "body": { "$ref": "#/$defs/workflowNode" },
+        "maxIterations": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "whileNode": {
+      "type": "object",
+      "required": ["kind", "nodeId", "condition", "body", "maxIterations"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "While" },
+        "nodeId": { "type": "string", "minLength": 1 },
+        "condition": { "$ref": "#/$defs/conditionExpression" },
+        "body": { "$ref": "#/$defs/workflowNode" },
+        "maxIterations": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "actionNode": {
+      "type": "object",
+      "required": ["kind", "nodeId", "actionType", "parameters"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Action" },
+        "nodeId": { "type": "string", "minLength": 1 },
+        "actionType": {
+          "type": "string",
+          "enum": ["Delay", "Log", "WebNavigate", "ExcelReadCell", "ExcelWriteCell"]
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    },
+    "conditionExpression": {
+      "oneOf": [
+        { "$ref": "#/$defs/binaryCondition" },
+        { "$ref": "#/$defs/unaryCondition" },
+        { "$ref": "#/$defs/logicalCondition" }
+      ]
+    },
+    "binaryCondition": {
+      "type": "object",
+      "required": ["kind", "operator", "left", "right"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Binary" },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "Equal",
+            "NotEqual",
+            "GreaterThan",
+            "GreaterThanOrEqual",
+            "LessThan",
+            "LessThanOrEqual",
+            "Contains",
+            "StartsWith",
+            "EndsWith"
+          ]
+        },
+        "left": { "$ref": "#/$defs/expression" },
+        "right": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "unaryCondition": {
+      "type": "object",
+      "required": ["kind", "operator", "operand"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Unary" },
+        "operator": {
+          "type": "string",
+          "enum": ["Not", "IsNull", "IsNotNull", "IsEmpty", "IsNotEmpty"]
+        },
+        "operand": { "$ref": "#/$defs/expression" }
+      }
+    },
+    "logicalCondition": {
+      "type": "object",
+      "required": ["kind", "operator", "conditions"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Logical" },
+        "operator": {
+          "type": "string",
+          "enum": ["And", "Or"]
+        },
+        "conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/conditionExpression" },
+          "minItems": 1
+        }
+      }
+    },
+    "expression": {
+      "oneOf": [
+        { "$ref": "#/$defs/literalExpression" },
+        { "$ref": "#/$defs/variableExpression" }
+      ]
+    },
+    "literalExpression": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Literal" },
+        "value": {}
+      }
+    },
+    "variableExpression": {
+      "type": "object",
+      "required": ["kind", "variableName"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "Variable" },
+        "variableName": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" }
+      }
+    }
+  }
+}
