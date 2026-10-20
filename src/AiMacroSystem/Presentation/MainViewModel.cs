@@ -22,6 +22,10 @@ public sealed class EasyStepItem
     public required string FriendlyTitle { get; init; }
     public required string FriendlyDetail { get; init; }
     public required WorkflowNode UnderlyingNode { get; init; }
+    public string BlockIcon { get; init; } = "⚙️";
+    public string BlockCategory { get; init; } = "操作ブロック";
+    public string AccentColorHex { get; init; } = "#2563EB";
+    public bool HasNextBlock { get; set; }
 }
 
 public sealed class FriendlyValidationItem
@@ -83,6 +87,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _localAiModel = "llama3.1:8b";
     private bool _allowExternalAiPolicy;
     private bool _openSystemBrowserOnNavigate;
+
+    private WorkflowVersionRecord? _selectedMacroInList;
+    private bool _isEditingMode;
+    private bool _isExecutingMacro;
+    private string _runningProgressText = "実行中...";
 
     public MainViewModel(
         SqliteRepository repository,
@@ -259,9 +268,33 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    public WorkflowVersionRecord? SelectedMacroInList
+    {
+        get => _selectedMacroInList;
+        set { _selectedMacroInList = value; OnPropertyChanged(); }
+    }
+
+    public bool IsEditingMode
+    {
+        get => _isEditingMode;
+        set { _isEditingMode = value; OnPropertyChanged(); }
+    }
+
+    public bool IsExecutingMacro
+    {
+        get => _isExecutingMacro;
+        set { _isExecutingMacro = value; OnPropertyChanged(); }
+    }
+
+    public string RunningProgressText
+    {
+        get => _runningProgressText;
+        set { _runningProgressText = value; OnPropertyChanged(); }
+    }
+
     public async Task InitializeAndCheckRecoveryAsync()
     {
-        var recoveries = await _recoveryService.RunStartupRecoveryAsync();
+        await _recoveryService.RunStartupRecoveryAsync();
         RefreshAllListsFromDatabase();
 
         if (EasySteps.Count == 0 && string.IsNullOrWhiteSpace(EditorIrJson))
@@ -269,9 +302,102 @@ public sealed class MainViewModel : INotifyPropertyChanged
             LoadSampleMacro();
         }
 
+        // 初回起動時にマクロ一覧が空であればサンプルマクロを1件自動保存して一覧に表示する
+        if (WorkflowVersions.Count == 0)
+        {
+            SaveCurrentWorkflowAsVersion();
+        }
+
+        if (SelectedMacroInList is null && WorkflowVersions.Count > 0)
+        {
+            SelectedMacroInList = WorkflowVersions[0];
+        }
+
         StatusBanner = PendingRecoveries.Count > 0
             ? $"⚠️ 前回の異常終了が {PendingRecoveries.Count} 件あります。上部の「ロック解除」を押してください"
-            : "準備完了：「▶ 実行」を押すとマクロが開始されます";
+            : "マクロ一覧からマクロを選択して「▶ 実行」「✏ 編集」「🗑 削除」を行えます";
+    }
+
+    public void StartNewMacroInEditor()
+    {
+        ClearEasySteps();
+        WorkflowIdInput = $"wf-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        WorkflowNameInput = "新しいマクロ";
+        LoadSampleMacro();
+        WorkflowIdInput = $"wf-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        WorkflowNameInput = "新しいマクロ";
+        IsEditingMode = true;
+        StatusBanner = "ブロックを追加・並べ替えてマクロを作成してください";
+    }
+
+    public void OpenSelectedMacroInEditor()
+    {
+        var target = SelectedMacroInList ?? WorkflowVersions.FirstOrDefault();
+        if (target is null)
+        {
+            StartNewMacroInEditor();
+            return;
+        }
+        LoadSelectedVersionIntoEditor(target);
+        IsEditingMode = true;
+    }
+
+    public void DeleteSelectedMacro()
+    {
+        if (SelectedMacroInList is null)
+        {
+            StatusBanner = "⚠️ 削除するマクロを一覧から選択してください";
+            return;
+        }
+        string deletedName = SelectedMacroInList.Name;
+        _repository.DeleteWorkflowCascade(SelectedMacroInList.WorkflowId);
+        RefreshAllListsFromDatabase();
+        SelectedMacroInList = WorkflowVersions.FirstOrDefault();
+        StatusBanner = $"🗑 マクロ「{deletedName}」を削除しました";
+    }
+
+    public async Task ExecuteSelectedMacroFromListAsync()
+    {
+        var target = SelectedMacroInList ?? WorkflowVersions.FirstOrDefault();
+        if (target is null)
+        {
+            StatusBanner = "⚠️ 実行するマクロを一覧から選択してください";
+            return;
+        }
+        LoadSelectedVersionIntoEditor(target);
+        ApproveCurrentWorkflow();
+        await ExecuteApprovedMacroAsync();
+    }
+
+    public void RemoveSpecificStep(EasyStepItem? item)
+    {
+        if (item is not null && EasySteps.Remove(item))
+        {
+            RebuildIrJsonFromEasySteps();
+            StatusBanner = $"ブロック「{item.FriendlyTitle}」を削除しました";
+        }
+    }
+
+    public void MoveStepUp(EasyStepItem? item)
+    {
+        if (item is null) return;
+        int idx = EasySteps.IndexOf(item);
+        if (idx > 0)
+        {
+            EasySteps.Move(idx, idx - 1);
+            RebuildIrJsonFromEasySteps();
+        }
+    }
+
+    public void MoveStepDown(EasyStepItem? item)
+    {
+        if (item is null) return;
+        int idx = EasySteps.IndexOf(item);
+        if (idx >= 0 && idx < EasySteps.Count - 1)
+        {
+            EasySteps.Move(idx, idx + 1);
+            RebuildIrJsonFromEasySteps();
+        }
     }
 
     public void LoadSampleMacro()
@@ -485,6 +611,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 break;
         }
 
+        var (icon, category, colorHex) = GetBlockVisualMeta(actionKind);
         EasySteps.Add(new EasyStepItem
         {
             StepNumber = num,
@@ -492,9 +619,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
             ActionType = actionKind,
             FriendlyTitle = title,
             FriendlyDetail = detail,
-            UnderlyingNode = node
+            UnderlyingNode = node,
+            BlockIcon = icon,
+            BlockCategory = category,
+            AccentColorHex = colorHex,
+            HasNextBlock = false
         });
     }
+
+    private static (string Icon, string Category, string ColorHex) GetBlockVisualMeta(string actionKind) =>
+        actionKind switch
+        {
+            IrConstants.ActionChromeNavigate => ("🌐", "Chrome ナビゲーション", "#2563EB"),
+            IrConstants.ActionChromeFill => ("✏️", "Chrome 文字入力", "#0D9488"),
+            IrConstants.ActionChromeClick => ("👆", "Chrome クリック操作", "#4F46E5"),
+            IrConstants.ActionChromeSubmit => ("📤", "Chrome フォーム外部送信", "#D97706"),
+            IrConstants.ActionExcelReadRange => ("📖", "Excel データ読み取り", "#16A34A"),
+            IrConstants.ActionExcelWriteRange => ("📝", "Excel データ書き込み", "#15803D"),
+            _ => ("⚙️", "アクション", "#475569")
+        };
 
     private void RebuildIrJsonFromEasySteps()
     {
@@ -502,10 +645,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var children = new List<WorkflowNode>();
 
         int num = 1;
+        int total = EasySteps.Count;
         foreach (var item in EasySteps)
         {
             item.StepNumber = num;
             item.UnderlyingNode.NodeId = $"step-{num}";
+            item.HasNextBlock = num < total;
             num++;
             children.Add(item.UnderlyingNode);
 
@@ -717,8 +862,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             return;
         }
 
+        async Task OnStepCompleted(string execId, string completedNodeId)
+        {
+            _activeRunningExecutionId = execId;
+            RunningProgressText = $"実行中: {WorkflowNameInput} ({completedNodeId} 完了)";
+            await Task.Delay(350);
+        }
+
+        _executionEngine.ActionNodeCompletedAsync += OnStepCompleted;
         try
         {
+            IsExecutingMacro = true;
+            RunningProgressText = $"実行中: {WorkflowNameInput} (全 {EasySteps.Count} ブロック)";
             StatusBanner = "🚀 マクロを実行中です...";
             var execRecord = await _executionEngine.ExecuteWorkflowVersionAsync(_currentSavedVersionId, _currentApprovalId);
             _activeRunningExecutionId = null;
@@ -737,6 +892,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
         catch (Exception ex)
         {
             StatusBanner = $"⛔ 安全ロックにより実行が拒否されました: {ex.Message}";
+        }
+        finally
+        {
+            _executionEngine.ActionNodeCompletedAsync -= OnStepCompleted;
+            IsExecutingMacro = false;
         }
     }
 
@@ -883,8 +1043,95 @@ public sealed class MainViewModel : INotifyPropertyChanged
         WorkflowNameInput = version.Name;
         _currentSavedVersionId = version.VersionId;
         _currentApprovalId = null;
+        RebuildEasyStepsFromIrJson(version.IrJson);
         ValidateCurrentEditorIr();
-        StatusBanner = $"📂 保存済みマクロ「{version.Name} (v{version.VersionNumber})」を読み込みました。";
+        StatusBanner = $"📂 マクロ「{version.Name} (v{version.VersionNumber})」を読み込みました";
+    }
+
+    private void RebuildEasyStepsFromIrJson(string irJson)
+    {
+        try
+        {
+            var def = JsonSerializer.Deserialize<WorkflowDefinition>(irJson);
+            if (def?.Root?.Children is null) return;
+
+            EasySteps.Clear();
+            int total = def.Root.Children.Count;
+            int idx = 1;
+            foreach (var node in def.Root.Children)
+            {
+                if (node.Type != IrConstants.NodeTypeAction || string.IsNullOrWhiteSpace(node.ActionType))
+                {
+                    continue;
+                }
+
+                var (title, detail) = DescribeActionNode(node);
+                var (icon, category, colorHex) = GetBlockVisualMeta(node.ActionType);
+                EasySteps.Add(new EasyStepItem
+                {
+                    StepNumber = idx,
+                    NodeId = node.NodeId,
+                    ActionType = node.ActionType,
+                    FriendlyTitle = title,
+                    FriendlyDetail = detail,
+                    UnderlyingNode = node,
+                    BlockIcon = icon,
+                    BlockCategory = category,
+                    AccentColorHex = colorHex,
+                    HasNextBlock = idx < total
+                });
+                idx++;
+            }
+        }
+        catch
+        {
+            // カスタムIR構造の場合は既存のJSON文字列をそのまま保持
+        }
+    }
+
+    private static (string Title, string Detail) DescribeActionNode(WorkflowNode node)
+    {
+        if (!node.Args.HasValue) return (node.ActionType ?? "操作", "");
+        JsonElement args = node.Args.Value;
+
+        switch (node.ActionType)
+        {
+            case IrConstants.ActionChromeNavigate:
+            {
+                var a = args.Deserialize<ChromeNavigateArgs>();
+                return ("🌐 Webページを開く", $"移動先URL: {a?.Url}");
+            }
+            case IrConstants.ActionChromeFill:
+            {
+                var a = args.Deserialize<ChromeFillArgs>();
+                string target = a?.Locator?.Label ?? a?.Locator?.AccessibleName ?? "入力欄";
+                string val = a?.IsSensitive == true ? "******** (保護)" : (a?.Value ?? "");
+                return ("✏️ 文字を入力する", $"「{target}」に「{val}」を入力");
+            }
+            case IrConstants.ActionChromeClick:
+            {
+                var a = args.Deserialize<ChromeClickArgs>();
+                string target = a?.Locator?.AccessibleName ?? a?.Locator?.Label ?? "ボタン";
+                return ("👆 ボタンをクリック", $"対象: 「{target}」");
+            }
+            case IrConstants.ActionChromeSubmit:
+            {
+                var a = args.Deserialize<ChromeSubmitArgs>();
+                return ("📤 フォームを送信", $"送信先: {a?.DestinationUrl}");
+            }
+            case IrConstants.ActionExcelReadRange:
+            {
+                var a = args.Deserialize<ExcelReadRangeArgs>();
+                return ("📖 Excelを読み取る", $"{Path.GetFileName(a?.WorkbookPath ?? "")} [{a?.SheetName}!{a?.RangeAddress}]");
+            }
+            case IrConstants.ActionExcelWriteRange:
+            {
+                var a = args.Deserialize<ExcelWriteRangeArgs>();
+                return ("📝 Excelに書き込む", $"{Path.GetFileName(a?.WorkbookPath ?? "")} [{a?.SheetName}!{a?.RangeAddress}]");
+            }
+            default:
+                return (node.ActionType ?? "アクション", "");
+        }
     }
 
     public void RefreshExecutionMonitor(string executionId)

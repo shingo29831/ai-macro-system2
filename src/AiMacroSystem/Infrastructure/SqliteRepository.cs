@@ -343,6 +343,35 @@ public sealed class SqliteRepository
         return list;
     }
 
+    public void DeleteWorkflowCascade(string workflowId)
+    {
+        using var conn = OpenConnection();
+        using var tx = conn.BeginTransaction();
+
+        string[] statements =
+        {
+            "DELETE FROM ExecutionEvents WHERE ExecutionId IN (SELECT ExecutionId FROM Executions WHERE VersionId IN (SELECT VersionId FROM WorkflowVersions WHERE WorkflowId = $wid));",
+            "DELETE FROM ActionExecutions WHERE ExecutionId IN (SELECT ExecutionId FROM Executions WHERE VersionId IN (SELECT VersionId FROM WorkflowVersions WHERE WorkflowId = $wid));",
+            "DELETE FROM RecoveryRecords WHERE ExecutionId IN (SELECT ExecutionId FROM Executions WHERE VersionId IN (SELECT VersionId FROM WorkflowVersions WHERE WorkflowId = $wid));",
+            "DELETE FROM Executions WHERE VersionId IN (SELECT VersionId FROM WorkflowVersions WHERE WorkflowId = $wid);",
+            "DELETE FROM Approvals WHERE VersionId IN (SELECT VersionId FROM WorkflowVersions WHERE WorkflowId = $wid);",
+            "DELETE FROM WorkflowDrafts WHERE WorkflowId = $wid;",
+            "DELETE FROM WorkflowVersions WHERE WorkflowId = $wid;",
+            "DELETE FROM Workflows WHERE WorkflowId = $wid;"
+        };
+
+        foreach (string sql in statements)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            cmd.Parameters.AddWithValue("$wid", workflowId);
+            cmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
+
     public WorkflowVersionRecord? GetLatestVersion(string workflowId)
     {
         using var conn = OpenConnection();
