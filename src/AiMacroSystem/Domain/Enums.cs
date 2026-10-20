@@ -1,4 +1,4 @@
-"""Module: @role: 実行状態・アクション状態・副作用・リスク・検証分類等のドメイン列挙型定義"""
+// Module: @role: 実行状態・アクション状態・副作用・リスク・検証分類等のドメイン列挙型定義
 using System;
 
 namespace AiMacroSystem.Domain;

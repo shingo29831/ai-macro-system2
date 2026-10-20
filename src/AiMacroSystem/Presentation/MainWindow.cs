@@ -1,4 +1,4 @@
-"""Module: @role: WPF 10機能タブ画面（一覧・記録・編集・検証・レビュー・承認・モニター・履歴・復旧・設定）のUI構築"""
+// Module: @role: WPF 10機能タブ画面（一覧・記録・編集・検証・レビュー・承認・モニター・履歴・復旧・設定）のUI構築
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;

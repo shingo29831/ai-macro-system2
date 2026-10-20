@@ -1,4 +1,4 @@
-"""Module: @role: 正式バージョンの不変管理・ドラフト競合防止・異常終了後の起動時状態照合と復旧制御"""
+// Module: @role: 正式バージョンの不変管理・ドラフト競合防止・異常終了後の起動時状態照合と復旧制御
 using System;
 using System.Collections.Generic;
 using System.Linq;

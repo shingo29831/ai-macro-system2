@@ -1,4 +1,4 @@
-"""Module: @role: ChromeおよびExcelアダプターの安全性検証・許可リスト強制・読み戻し照合契約"""
+// Module: @role: ChromeおよびExcelアダプターの安全性検証・許可リスト強制・読み戻し照合契約
 using System;
 using System.Collections.Generic;
 using System.IO;

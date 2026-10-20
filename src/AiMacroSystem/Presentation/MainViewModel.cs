@@ -1,4 +1,4 @@
-"""Module: @role: 第16章の全10画面機能（一覧・記録・編集・検証・レビュー・承認・実行・履歴・復旧・設定）を統合するWPF ViewModel"""
+// Module: @role: 第16章の全10画面機能（一覧・記録・編集・検証・レビュー・承認・実行・履歴・復旧・設定）を統合するWPF ViewModel
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;

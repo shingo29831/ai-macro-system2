@@ -1,4 +1,4 @@
-"""Module: @role: 単一ワークフロー排他制御・状態機械駆動・アクション境界での停止/キャンセル・Unknown自動再試行禁止"""
+// Module: @role: 単一ワークフロー排他制御・状態機械駆動・アクション境界での停止/キャンセル・Unknown自動再試行禁止
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -22,6 +22,8 @@ public sealed class ExecutionEngine
     private volatile bool _pauseRequested;
     private volatile bool _cancelRequested;
     private TaskCompletionSource<bool>? _resumeSignal;
+
+    public event Func<string, string, Task>? ActionNodeCompletedAsync;
 
     public ExecutionEngine(
         SqliteRepository repository,
@@ -82,7 +84,6 @@ public sealed class ExecutionEngine
     public async Task<ExecutionRecord> ExecuteWorkflowVersionAsync(
         string versionId,
         string? approvalId,
-        Func<Task>? onAfterFirstActionCallbackForTest = null,
         CancellationToken ct = default)
     {
         // 1. 異常終了後の復旧未完了チェックと単一ワークフロー排他制御（仕様12.3 / 12.4 / 18.7 / 18.8）
@@ -147,7 +148,7 @@ public sealed class ExecutionEngine
             TransitionExecution(executionId, ExecutionStatus.Ready, ExecutionStatus.Running, "Starting sequential execution.");
 
             var runtimeOutputs = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal);
-            var outcomeFlags = new ExecutionOutcomeFlags { AfterFirstActionCallback = onAfterFirstActionCallbackForTest };
+            var outcomeFlags = new ExecutionOutcomeFlags();
 
             await ExecuteNodeRecursiveAsync(executionId, definition.Root!, definition.Policy, plan, runtimeOutputs, outcomeFlags, ct);
 
@@ -184,8 +185,6 @@ public sealed class ExecutionEngine
         public bool HasFailed { get; set; }
         public bool HasUnknown { get; set; }
         public bool WasCancelled { get; set; }
-        public int ExecutedActionCount { get; set; }
-        public Func<Task>? AfterFirstActionCallback { get; init; }
 
         public bool ShouldStop => HasFailed || HasUnknown || WasCancelled;
     }
@@ -382,10 +381,9 @@ public sealed class ExecutionEngine
             break;
         }
 
-        flags.ExecutedActionCount++;
-        if (flags.ExecutedActionCount == 1 && flags.AfterFirstActionCallback is not null)
+        if (ActionNodeCompletedAsync is not null)
         {
-            await flags.AfterFirstActionCallback();
+            await ActionNodeCompletedAsync.Invoke(executionId, node.NodeId);
         }
     }
 

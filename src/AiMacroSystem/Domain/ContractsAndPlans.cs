@@ -1,4 +1,4 @@
-"""Module: @role: アクション契約・実行計画・永続化エンティティ・検証結果のデータ契約定義"""
+// Module: @role: アクション契約・実行計画・永続化エンティティ・検証結果のデータ契約定義
 using System;
 using System.Collections.Generic;
 

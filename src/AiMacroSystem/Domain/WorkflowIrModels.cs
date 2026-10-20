@@ -1,4 +1,4 @@
-"""Module: @role: Workflow IR v0.7 の構造化ノード・型付き引数・データ参照・ポリシー宣言モデル"""
+// Module: @role: Workflow IR v0.7 の構造化ノード・型付き引数・データ参照・ポリシー宣言モデル
 using System;
 using System.Collections.Generic;
 using System.Text.Json;

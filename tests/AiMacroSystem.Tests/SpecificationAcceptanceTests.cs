@@ -1,4 +1,4 @@
-"""Module: @role: 仕様書第18章(18.1〜18.11)の全受け入れ条件・障害注入・安全性契約を検証する統合テスト"""
+// Module: @role: 仕様書第18章(18.1〜18.11)の全受け入れ条件・障害注入・安全性契約を検証する統合テスト
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using AiMacroSystem.Application;
 using AiMacroSystem.Domain;
 using AiMacroSystem.Infrastructure;
+using Microsoft.Data.Sqlite;
 using Xunit;
 
 namespace AiMacroSystem.Tests;
@@ -387,7 +388,7 @@ public sealed class SpecificationAcceptanceTests : IDisposable
                         ActionType = IrConstants.ActionExcelWriteRange,
                         Args = JsonSerializer.SerializeToElement(new ExcelWriteRangeArgs
                         {
-                            WorkbookPath = @"C:\Temp\Book1.xlsx",
+                            WorkbookPath = Path.Combine(Path.GetTempPath(), "Book1.xlsx"),
                             SheetName = "Sheet1",
                             RangeAddress = "A1:B2",
                             Values = new List<List<string>>
@@ -433,23 +434,29 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         var approval = _repository.SaveApproval(ver.VersionId, plan!.PlanHash, "tester", ApprovalDecision.Approved, Array.Empty<string>());
 
         // 一時停止中に別ワークフローを開始しようとしてもExecutionEngineが排他拒否することを確認
-        Task<ExecutionRecord>? firstRunTask = null;
-        firstRunTask = _executionEngine.ExecuteWorkflowVersionAsync(
-            ver.VersionId,
-            approval.ApprovalId,
-            onAfterFirstActionCallbackForTest: async () =>
+        async Task OnFirstActionCompleted(string activeExecutionId, string completedNodeId)
+        {
+            if (completedNodeId == "nav-1")
             {
-                var runningExecs = _repository.GetNonTerminalExecutions();
-                string activeId = runningExecs[0].ExecutionId;
-                _executionEngine.RequestPause(activeId);
+                _executionEngine.RequestPause(activeExecutionId);
 
                 await Assert.ThrowsAsync<InvalidOperationException>(async () =>
                     await _executionEngine.ExecuteWorkflowVersionAsync(ver.VersionId, approval.ApprovalId));
 
-                _executionEngine.RequestCancel(activeId);
-            });
+                _executionEngine.RequestCancel(activeExecutionId);
+            }
+        }
 
-        var cancelledExec = await firstRunTask;
+        _executionEngine.ActionNodeCompletedAsync += OnFirstActionCompleted;
+        ExecutionRecord cancelledExec;
+        try
+        {
+            cancelledExec = await _executionEngine.ExecuteWorkflowVersionAsync(ver.VersionId, approval.ApprovalId);
+        }
+        finally
+        {
+            _executionEngine.ActionNodeCompletedAsync -= OnFirstActionCompleted;
+        }
         Assert.Equal(ExecutionStatus.Cancelled, cancelledExec.Status);
         var actionRecords = _repository.GetActionExecutions(cancelledExec.ExecutionId);
         // 1つ目のアクション完了後の境界でキャンセル要求が反映され、2つ目は実行されない

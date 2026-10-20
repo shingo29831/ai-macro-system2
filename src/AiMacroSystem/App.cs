@@ -1,4 +1,4 @@
-"""Module: @role: アプリケーションエントリポイント・依存関係注入・起動時リカバリー初期化"""
+// Module: @role: アプリケーションエントリポイント・依存関係注入・起動時リカバリー初期化
 using System;
 using System.Collections.Generic;
 using System.IO;

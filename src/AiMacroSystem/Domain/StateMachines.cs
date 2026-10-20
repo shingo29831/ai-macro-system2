@@ -1,4 +1,4 @@
-"""Module: @role: 実行全体およびアクション単位の状態遷移表と遷移規則の強制"""
+// Module: @role: 実行全体およびアクション単位の状態遷移表と遷移規則の強制
 using System;
 using System.Collections.Generic;
 

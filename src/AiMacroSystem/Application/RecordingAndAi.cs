@@ -1,4 +1,4 @@
-"""Module: @role: 操作記録・機密情報除外・意味的正規化・ローカル優先AIオーケストレーター・AI監査"""
+// Module: @role: 操作記録・機密情報除外・意味的正規化・ローカル優先AIオーケストレーター・AI監査
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -236,7 +236,7 @@ public interface IAiProvider
         CancellationToken ct);
 }
 
-public sealed classAiGenerationOutcome
+public sealed class AiGenerationOutcome
 {
     public required bool IsAccepted { get; init; }
     public WorkflowDefinition? Definition { get; init; }
@@ -268,7 +268,7 @@ public sealed class AiOrchestrator
         _maxRepairAttempts = maxRepairAttempts;
     }
 
-    public async Task<classAiGenerationOutcome> GenerateAndValidateIrAsync(
+    public async Task<AiGenerationOutcome> GenerateAndValidateIrAsync(
         IReadOnlyList<NormalizedActionCandidate> candidates,
         PolicyDeclaration policy,
         bool userApprovedExternalAi,
@@ -285,7 +285,7 @@ public sealed class AiOrchestrator
                 $"Candidate '{ambiguous.CandidateId}' is ambiguous ({ambiguous.AmbiguityReason}). User disambiguation is required before AI IR generation.");
 
             RecordAudit(_localProvider.ProviderName, _localProvider.ModelId, "PreCheck:AmbiguousCandidate", false, "AMBIGUOUS_TARGET", 0, false);
-            return new classAiGenerationOutcome
+            return new AiGenerationOutcome
             {
                 IsAccepted = false,
                 Validation = ambValidation,
@@ -312,7 +312,7 @@ public sealed class AiOrchestrator
                     "Local AI is unavailable, and implicit fallback to external AI is prohibited without policy permission and explicit user approval.");
 
                 RecordAudit(_localProvider.ProviderName, _localProvider.ModelId, "ProviderSelection", false, "AI_PROVIDER_UNAVAILABLE", 0, false);
-                return new classAiGenerationOutcome
+                return new AiGenerationOutcome
                 {
                     IsAccepted = false,
                     Validation = noAiValidation,
@@ -344,7 +344,7 @@ public sealed class AiOrchestrator
             if (validation.IsValid && definition is not null)
             {
                 RecordAudit(activeProvider.ProviderName, activeProvider.ModelId, "AllStagesPassed", true, "NONE", attempt, externalApproved);
-                return new classAiGenerationOutcome
+                return new AiGenerationOutcome
                 {
                     IsAccepted = true,
                     Definition = definition,
@@ -362,7 +362,7 @@ public sealed class AiOrchestrator
         string stageSummary = string.Join(",", lastValidation.Issues.Select(i => i.Stage.ToString()).Distinct());
         RecordAudit(activeProvider.ProviderName, activeProvider.ModelId, stageSummary, false, firstErrorCode, _maxRepairAttempts, externalApproved);
 
-        return new classAiGenerationOutcome
+        return new AiGenerationOutcome
         {
             IsAccepted = false,
             RawJson = lastJson,

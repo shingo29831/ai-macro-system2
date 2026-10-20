@@ -1,4 +1,4 @@
-"""Module: @role: IRの8段階静的検証・データ参照スコープ検証・リスク評価・実行計画ハッシュ・承認検証"""
+// Module: @role: IRの8段階静的検証・データ参照スコープ検証・リスク評価・実行計画ハッシュ・承認検証
 using System;
 using System.Collections.Generic;
 using System.IO;

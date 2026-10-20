@@ -1,4 +1,4 @@
-"""Module: @role: SQLiteによるハイブリッド永続化・状態更新と履歴追記の同一トランザクション保証"""
+// Module: @role: SQLiteによるハイブリッド永続化・状態更新と履歴追記の同一トランザクション保証
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
