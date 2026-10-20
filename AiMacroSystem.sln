@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34330.188
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AiMacroSystem", "src\AiMacroSystem\AiMacroSystem.csproj", "{8B6F2A10-4D3E-4F9A-9B1C-112233445566}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AiMacroSystem.Tests", "tests\AiMacroSystem.Tests\AiMacroSystem.Tests.csproj", "{9C7E3B21-5E4F-4A8B-8C2D-223344556677}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8B6F2A10-4D3E-4F9A-9B1C-112233445566}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8B6F2A10-4D3E-4F9A-9B1C-112233445566}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8B6F2A10-4D3E-4F9A-9B1C-112233445566}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8B6F2A10-4D3E-4F9A-9B1C-112233445566}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9C7E3B21-5E4F-4A8B-8C2D-223344556677}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9C7E3B21-5E4F-4A8B-8C2D-223344556677}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9C7E3B21-5E4F-4A8B-8C2D-223344556677}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9C7E3B21-5E4F-4A8B-8C2D-223344556677}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

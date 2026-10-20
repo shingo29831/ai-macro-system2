@@ -1,0 +1,245 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aimacrosystem.local/schemas/workflow-ir-v0.7.schema.json",
+  "title": "AI Macro System Workflow IR v0.7",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "workflowId",
+    "name",
+    "version",
+    "policy",
+    "root"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "0.7"
+    },
+    "workflowId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "policy": {
+      "$ref": "#/$defs/policyDeclaration"
+    },
+    "root": {
+      "$ref": "#/$defs/workflowNode"
+    }
+  },
+  "$defs": {
+    "policyDeclaration": {
+      "type": "object",
+      "required": [
+        "allowedOrigins",
+        "allowCoordinateClick",
+        "allowExternalAi"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "allowedOrigins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/originRule"
+          }
+        },
+        "allowCoordinateClick": {
+          "type": "boolean"
+        },
+        "allowExternalAi": {
+          "type": "boolean"
+        },
+        "allowedExcelDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "originRule": {
+      "type": "object",
+      "required": [
+        "scheme",
+        "host",
+        "port"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "enum": [ "https", "http" ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "dataReference": {
+      "type": "object",
+      "required": [
+        "sourceNodeId",
+        "outputName",
+        "expectedType"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sourceNodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outputName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expectedType": {
+          "type": "string",
+          "enum": [
+            "String",
+            "Number",
+            "Boolean",
+            "Array<String>",
+            "Table2D"
+          ]
+        },
+        "isOptional": {
+          "type": "boolean"
+        }
+      }
+    },
+    "workflowNode": {
+      "type": "object",
+      "required": [
+        "nodeId",
+        "type"
+      ],
+      "properties": {
+        "nodeId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "Sequence",
+            "If",
+            "ForEach",
+            "While",
+            "Action"
+          ]
+        },
+        "actionType": {
+          "type": "string",
+          "enum": [
+            "Chrome.Navigate",
+            "Chrome.Click",
+            "Chrome.Fill",
+            "Chrome.Submit",
+            "Excel.ReadRange",
+            "Excel.WriteRange"
+          ]
+        },
+        "args": {
+          "type": "object"
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workflowNode"
+          }
+        },
+        "condition": {
+          "$ref": "#/$defs/conditionExpression"
+        },
+        "thenChildren": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workflowNode"
+          }
+        },
+        "elseChildren": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workflowNode"
+          }
+        },
+        "collectionRef": {
+          "$ref": "#/$defs/dataReference"
+        },
+        "itemVariableName": {
+          "type": "string"
+        },
+        "bodyChildren": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/workflowNode"
+          }
+        },
+        "maxIterations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "declaredOutputs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "String",
+              "Number",
+              "Boolean",
+              "Array<String>",
+              "Table2D"
+            ]
+          }
+        },
+        "sourceCandidateIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "conditionExpression": {
+      "type": "object",
+      "required": [
+        "leftRef",
+        "operator"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "leftRef": {
+          "$ref": "#/$defs/dataReference"
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "Equals",
+            "NotEquals",
+            "NotEmpty"
+          ]
+        },
+        "rightLiteral": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
