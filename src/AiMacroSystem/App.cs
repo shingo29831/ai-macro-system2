@@ -67,8 +67,12 @@ public sealed class App : System.Windows.Application
         var recordingService = new RecordingService();
         var normalizationService = new NormalizationService();
 
-        var chromeAdapter = new ChromeAdapter(new DisconnectedBrowserDriver());
-        var excelAdapter = new ExcelAdapter(new DisconnectedExcelDriver());
+        var liveBrowserDriver = new LiveChromeBrowserDriver();
+        var liveExcelDriver = new LiveExcelDriver();
+        var localAiProvider = new LocalBuiltInAiProvider();
+
+        var chromeAdapter = new ChromeAdapter(liveBrowserDriver);
+        var excelAdapter = new ExcelAdapter(liveExcelDriver);
 
         var adapters = new Dictionary<string, IActionAdapter>(StringComparer.Ordinal)
         {
@@ -82,6 +86,7 @@ public sealed class App : System.Windows.Application
 
         var recoveryService = new RecoveryService(repository, adapters);
         var executionEngine = new ExecutionEngine(repository, policyEngine, approvalService, recoveryService, adapters);
+        var aiOrchestrator = new AiOrchestrator(localAiProvider, null, validator, repository);
 
         var viewModel = new MainViewModel(
             repository,
@@ -91,7 +96,9 @@ public sealed class App : System.Windows.Application
             policyEngine,
             approvalService,
             executionEngine,
-            recoveryService);
+            recoveryService,
+            aiOrchestrator,
+            liveBrowserDriver);
 
         var app = new App();
         var window = new MainWindow(viewModel);

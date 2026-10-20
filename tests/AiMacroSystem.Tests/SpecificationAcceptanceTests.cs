@@ -513,4 +513,67 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         // v1をベースにした古いdraftBを確定しようとすると上書き防止エラーになる
         Assert.Throws<InvalidOperationException>(() => _workflowService.CommitDraftAsNewVersion(draftB.DraftId));
     }
+
+    [Fact]
+    public async Task Section18_11_EndToEnd_EasyMacroBuilder_Recording_AiGeneration_AndLiveExecution()
+    {
+        var liveBrowser = new LiveChromeBrowserDriver();
+        var liveExcel = new LiveExcelDriver();
+        var localAi = new LocalBuiltInAiProvider();
+
+        var chromeAdapter = new ChromeAdapter(liveBrowser);
+        var excelAdapter = new ExcelAdapter(liveExcel);
+        var liveAdapters = new Dictionary<string, IActionAdapter>(StringComparer.Ordinal)
+        {
+            [IrConstants.ActionChromeNavigate] = chromeAdapter,
+            [IrConstants.ActionChromeClick] = chromeAdapter,
+            [IrConstants.ActionChromeFill] = chromeAdapter,
+            [IrConstants.ActionChromeSubmit] = chromeAdapter,
+            [IrConstants.ActionExcelReadRange] = excelAdapter,
+            [IrConstants.ActionExcelWriteRange] = excelAdapter
+        };
+
+        var liveRecovery = new RecoveryService(_repository, liveAdapters);
+        var liveEngine = new ExecutionEngine(_repository, _policyEngine, _approvalService, liveRecovery, liveAdapters);
+        var recordingService = new RecordingService();
+        var normalizationService = new NormalizationService();
+        var aiOrchestrator = new AiOrchestrator(localAi, null, _validator, _repository);
+
+        var vm = new AiMacroSystem.Presentation.MainViewModel(
+            _repository,
+            _workflowService,
+            recordingService,
+            normalizationService,
+            _policyEngine,
+            _approvalService,
+            liveEngine,
+            liveRecovery,
+            aiOrchestrator,
+            liveBrowser);
+
+        vm.StepExcelPathInput = Path.Combine(Path.GetTempPath(), $"LiveMacro-{Guid.NewGuid():N}.xlsx");
+        await vm.InitializeAndCheckRecoveryAsync();
+
+        // サンプルマクロが自動構成され、ワンクリックで保存・承認・実行まで完了することを確認
+        Assert.Equal(4, vm.EasySteps.Count);
+        await vm.ExecuteOneClickAllInOneAsync();
+
+        Assert.NotEmpty(vm.AllExecutions);
+        Assert.Equal(ExecutionStatus.Succeeded, vm.AllExecutions[0].Status);
+        Assert.Equal(4, vm.CurrentRunActionStatuses.Count);
+        Assert.All(vm.CurrentRunActionStatuses, a => Assert.Equal(ActionExecutionStatus.Succeeded, a.Status));
+
+        // 記録からAI変換で新しいマクロを生成して実行できることを確認
+        vm.StartEasyRecording();
+        vm.RecordSimulatedWebOpen();
+        vm.RecordSimulatedWebInput(asPassword: true);
+        vm.RecordSimulatedExcelWrite();
+        vm.StopEasyRecording();
+
+        await vm.GenerateMacroFromRecordingViaAiAsync();
+        Assert.Empty(vm.CurrentValidationIssues);
+
+        await vm.ExecuteOneClickAllInOneAsync();
+        Assert.Equal(ExecutionStatus.Succeeded, vm.AllExecutions[0].Status);
+    }
 }

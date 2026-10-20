@@ -288,6 +288,61 @@ public sealed class SqliteRepository
             DateTimeOffset.Parse(reader.GetString(6)));
     }
 
+    public IReadOnlyList<WorkflowVersionRecord> GetAllLatestVersions()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT v.VersionId, v.WorkflowId, w.Name, v.VersionNumber, v.IrJson, v.SchemaVersion, v.CreatedAt
+            FROM WorkflowVersions v
+            JOIN Workflows w ON w.WorkflowId = v.WorkflowId
+            WHERE v.VersionNumber = (
+                SELECT MAX(v2.VersionNumber)
+                FROM WorkflowVersions v2
+                WHERE v2.WorkflowId = v.WorkflowId
+            )
+            ORDER BY v.CreatedAt DESC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<WorkflowVersionRecord>();
+        while (reader.Read())
+        {
+            list.Add(new WorkflowVersionRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt32(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                DateTimeOffset.Parse(reader.GetString(6))));
+        }
+        return list;
+    }
+
+    public IReadOnlyList<ExecutionRecord> GetAllExecutions()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt
+            FROM Executions
+            ORDER BY StartedAt DESC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<ExecutionRecord>();
+        while (reader.Read())
+        {
+            list.Add(new ExecutionRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                Enum.Parse<ExecutionStatus>(reader.GetString(3)),
+                DateTimeOffset.Parse(reader.GetString(4)),
+                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5))));
+        }
+        return list;
+    }
+
     public WorkflowVersionRecord? GetLatestVersion(string workflowId)
     {
         using var conn = OpenConnection();
