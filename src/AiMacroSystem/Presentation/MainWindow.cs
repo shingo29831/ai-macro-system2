@@ -1,8 +1,10 @@
-// Module: @role: IT知識の少ないユーザーでも直感的に操作できるガイド付きWPFメインウィンドウ
+// Module: @role: 最小限のボタンと動的フォームによるモダン・シンプルなWPFメインウィンドウ
+using System.Collections.Specialized;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
 using AiMacroSystem.Domain;
 
@@ -10,629 +12,634 @@ namespace AiMacroSystem.Presentation;
 
 public sealed class MainWindow : Window
 {
+    private static readonly Color _bgCanvas = Color.FromRgb(248, 250, 252);
+    private static readonly Color _bgCard = Color.FromRgb(255, 255, 255);
+    private static readonly Color _borderSubtle = Color.FromRgb(226, 232, 240);
+    private static readonly Color _textPrimary = Color.FromRgb(15, 23, 42);
+    private static readonly Color _textSecondary = Color.FromRgb(100, 116, 139);
+    private static readonly Color _accentPrimary = Color.FromRgb(37, 99, 235);
+    private static readonly Color _accentSuccess = Color.FromRgb(16, 185, 129);
+    private static readonly Color _accentDanger = Color.FromRgb(239, 68, 68);
+    private static readonly Color _accentNeutral = Color.FromRgb(241, 245, 249);
+
     private readonly MainViewModel _vm;
-    private readonly TabControl _mainTabControl;
+    private readonly TabControl _tabControl;
+
+    private StackPanel _fieldUrlPanel = null!;
+    private StackPanel _fieldElementPanel = null!;
+    private StackPanel _fieldValuePanel = null!;
+    private CheckBox _fieldPasswordCheck = null!;
+    private StackPanel _fieldExcelPathPanel = null!;
+    private Grid _fieldExcelMetaGrid = null!;
+    private StackPanel _fieldExcelWritePanel = null!;
 
     public MainWindow(MainViewModel viewModel)
     {
         _vm = viewModel;
         DataContext = viewModel;
-        Title = "かんたんAIマクロ (AI Macro System v0.7) - Chrome & Excel 自動化アシスタント";
-        Width = 1240;
-        Height = 840;
-        Background = new SolidColorBrush(Color.FromRgb(244, 246, 249));
+        Title = "AI Macro";
+        Width = 1040;
+        Height = 720;
+        MinWidth = 860;
+        MinHeight = 600;
+        FontFamily = new FontFamily("Yu Gothic UI, Meiryo UI, Segoe UI");
+        Background = new SolidColorBrush(_bgCanvas);
+        Foreground = new SolidColorBrush(_textPrimary);
 
-        var rootGrid = new Grid();
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var root = new Grid();
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        // 1. 上部ステータス案内バナー
-        var bannerBorder = new Border
+        // 1. モダンヘッダーバー（タイトル＋ステータス＋最小限の主ボタン）
+        Grid.SetRow(CreateHeaderBar(), 0);
+        root.Children.Add(CreateHeaderBar());
+
+        // 2. 異常終了時のみ表示される1行リカバリーバー
+        var recoveryBanner = CreateRecoveryAlertBar();
+        Grid.SetRow(recoveryBanner, 1);
+        root.Children.Add(recoveryBanner);
+
+        // 3. シンプルな3タブ構成
+        _tabControl = new TabControl
         {
-            Background = new SolidColorBrush(Color.FromRgb(30, 58, 138)),
-            Padding = new Thickness(16, 12, 16, 12)
-        };
-        var bannerText = new TextBlock
-        {
-            Foreground = Brushes.White,
-            FontSize = 14,
-            FontWeight = FontWeights.Bold,
-            TextWrapping = TextWrapping.Wrap
-        };
-        bannerText.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.StatusBanner)));
-        bannerBorder.Child = bannerText;
-        Grid.SetRow(bannerBorder, 0);
-        rootGrid.Children.Add(bannerBorder);
-
-        // 2. 常時表示のクイックアクションバー（迷わず使えるワンクリック導線）
-        var quickBarBorder = new Border
-        {
-            Background = Brushes.White,
-            BorderBrush = new SolidColorBrush(Color.FromRgb(219, 224, 233)),
-            BorderThickness = new Thickness(0, 0, 0, 1),
-            Padding = new Thickness(16, 10, 16, 10)
-        };
-        var quickPanel = new WrapPanel { VerticalAlignment = VerticalAlignment.Center };
-
-        quickPanel.Children.Add(new TextBlock
-        {
-            Text = "かんたん操作メニュー：",
-            FontWeight = FontWeights.Bold,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 12, 0)
-        });
-
-        var sampleBtn = CreateStyledButton("💡 ① お試しサンプル読込", Color.FromRgb(71, 85, 105));
-        sampleBtn.Click += (_, _) => { _vm.LoadSampleMacro(); _mainTabControl!.SelectedIndex = 0; };
-        quickPanel.Children.Add(sampleBtn);
-
-        var saveBtn = CreateStyledButton("💾 ② マクロを保存", Color.FromRgb(37, 99, 235));
-        saveBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
-        quickPanel.Children.Add(saveBtn);
-
-        var approveBtn = CreateStyledButton("✅ ③ 安全確認して承認", Color.FromRgb(13, 148, 136));
-        approveBtn.Click += (_, _) => { _vm.ApproveCurrentWorkflow(); _mainTabControl!.SelectedIndex = 2; };
-        quickPanel.Children.Add(approveBtn);
-
-        var oneClickRunBtn = CreateStyledButton("▶ ④ マクロをワンクリック実行（保存＋承認＋自動実行）", Color.FromRgb(22, 163, 74));
-        oneClickRunBtn.Click += async (_, _) =>
-        {
-            _mainTabControl!.SelectedIndex = 3;
-            await _vm.ExecuteOneClickAllInOneAsync();
-        };
-        quickPanel.Children.Add(oneClickRunBtn);
-
-        quickBarBorder.Child = quickPanel;
-        Grid.SetRow(quickBarBorder, 1);
-        rootGrid.Children.Add(quickBarBorder);
-
-        // 3. メインタブ
-        _mainTabControl = new TabControl
-        {
-            Margin = new Thickness(14, 10, 14, 14),
-            FontSize = 13
+            Margin = new Thickness(24, 16, 24, 24),
+            BorderThickness = new Thickness(0),
+            Background = Brushes.Transparent,
+            FontSize = 13.5
         };
 
-        _mainTabControl.Items.Add(CreateTab1EasyBuilder());
-        _mainTabControl.Items.Add(CreateTab2RecordingAndAi());
-        _mainTabControl.Items.Add(CreateTab3SafetyAndApproval());
-        _mainTabControl.Items.Add(CreateTab4ExecutionMonitor());
-        _mainTabControl.Items.Add(CreateTab5HistoryAndRecovery());
-        _mainTabControl.Items.Add(CreateTab6Settings());
+        _tabControl.Items.Add(CreateWorkspaceTab());
+        _tabControl.Items.Add(CreateStatusAndSafetyTab());
+        _tabControl.Items.Add(CreateSettingsAndAdvancedTab());
 
-        Grid.SetRow(_mainTabControl, 2);
-        rootGrid.Children.Add(_mainTabControl);
+        Grid.SetRow(_tabControl, 2);
+        root.Children.Add(_tabControl);
 
-        Content = rootGrid;
+        Content = root;
+        UpdateInputFieldsVisibility(_vm.SelectedActionKind);
     }
 
-    private TabItem CreateTab1EasyBuilder()
+    private Border CreateHeaderBar()
     {
-        var mainGrid = new Grid { Margin = new Thickness(10) };
-        mainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(300) });
-        mainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-        mainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        // 左カラム：保存済みマクロ一覧
-        var leftGroup = new GroupBox
+        var header = new Border
         {
-            Header = "📁 保存済みのマクロ一覧",
-            Padding = new Thickness(8),
-            Background = Brushes.White
+            Background = new SolidColorBrush(_bgCard),
+            BorderBrush = new SolidColorBrush(_borderSubtle),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(24, 14, 24, 14)
         };
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        // アプリロゴ＋タイトル
+        var titleStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        var badge = new Border
+        {
+            Background = new SolidColorBrush(_accentPrimary),
+            CornerRadius = new CornerRadius(6),
+            Padding = new Thickness(8, 4, 8, 4),
+            Margin = new Thickness(0, 0, 10, 0)
+        };
+        badge.Child = new TextBlock { Text = "AI", Foreground = Brushes.White, FontWeight = FontWeights.Bold, FontSize = 13 };
+        titleStack.Children.Add(badge);
+        titleStack.Children.Add(new TextBlock
+        {
+            Text = "Macro Studio",
+            FontSize = 17,
+            FontWeight = FontWeights.Bold,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        Grid.SetColumn(titleStack, 0);
+        grid.Children.Add(titleStack);
+
+        // ステータスピル（1行・控えめ）
+        var statusPill = new Border
+        {
+            Background = new SolidColorBrush(_accentNeutral),
+            CornerRadius = new CornerRadius(14),
+            Padding = new Thickness(14, 6, 14, 6),
+            Margin = new Thickness(24, 0, 24, 0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var statusText = new TextBlock
+        {
+            FontSize = 12.5,
+            Foreground = new SolidColorBrush(_textPrimary),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        statusText.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.StatusBanner)));
+        statusPill.Child = statusText;
+        Grid.SetColumn(statusPill, 1);
+        grid.Children.Add(statusPill);
+
+        // 右側メイン操作ボタン（最小限の2ボタン：停止 / 実行）
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+        var stopBtn = CreateButton("⏹ 停止", _accentNeutral, _textPrimary, isCompact: true);
+        stopBtn.Margin = new Thickness(0, 0, 10, 0);
+        stopBtn.Click += (_, _) => _vm.CancelActiveMacro();
+        actions.Children.Add(stopBtn);
+
+        var runBtn = CreateButton("▶ 実行する", _accentSuccess, Brushes.White.Color, isCompact: false);
+        runBtn.Click += async (_, _) =>
+        {
+            await _vm.ExecuteOneClickAllInOneAsync();
+            _tabControl.SelectedIndex = 1;
+        };
+        actions.Children.Add(runBtn);
+
+        Grid.SetColumn(actions, 2);
+        grid.Children.Add(actions);
+
+        header.Child = grid;
+        return header;
+    }
+
+    private Border CreateRecoveryAlertBar()
+    {
+        var bar = new Border
+        {
+            Background = new SolidColorBrush(Color.FromRgb(254, 242, 242)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(254, 202, 202)),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(24, 10, 24, 10),
+            Visibility = _vm.PendingRecoveries.Count > 0 ? Visibility.Visible : Visibility.Collapsed
+        };
+
+        ((INotifyCollectionChanged)_vm.PendingRecoveries).CollectionChanged += (_, _) =>
+        {
+            bar.Visibility = _vm.PendingRecoveries.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        };
+
+        var dock = new DockPanel();
+        var unlockBtn = CreateButton("確認してロック解除", _accentDanger, Colors.White, isCompact: true);
+        unlockBtn.Click += (_, _) => _vm.ResolveFirstPendingRecovery(RecoveryStatus.ResolvedAsFailed, "ユーザー確認によるロック解除");
+        DockPanel.SetDock(unlockBtn, Dock.Right);
+        dock.Children.Add(unlockBtn);
+
+        dock.Children.Add(new TextBlock
+        {
+            Text = "⚠️ 前回途中で終了したマクロがあります。二重実行を防ぐため安全ロック中です。",
+            Foreground = new SolidColorBrush(Color.FromRgb(185, 28, 28)),
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+
+        bar.Child = dock;
+        return bar;
+    }
+
+    private TabItem CreateWorkspaceTab()
+    {
+        var grid = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.25, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        // 左カード：手順リスト
+        var leftCard = CreateCard();
         var leftDock = new DockPanel();
-        var loadVerBtn = CreateStyledButton("📂 選んだマクロを呼び出す", Color.FromRgb(37, 99, 235));
-        DockPanel.SetDock(loadVerBtn, Dock.Bottom);
-        leftDock.Children.Add(loadVerBtn);
 
-        var verGrid = new DataGrid
-        {
-            AutoGenerateColumns = false,
-            IsReadOnly = true,
-            SelectionMode = DataGridSelectionMode.Single,
-            Margin = new Thickness(0, 0, 0, 8)
-        };
-        verGrid.Columns.Add(new DataGridTextColumn { Header = "マクロ名", Binding = new Binding("Name"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        verGrid.Columns.Add(new DataGridTextColumn { Header = "版", Binding = new Binding("VersionNumber"), Width = 45 });
-        verGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.WorkflowVersions)));
-        loadVerBtn.Click += (_, _) =>
-        {
-            if (verGrid.SelectedItem is WorkflowVersionRecord rec)
-            {
-                _vm.LoadSelectedVersionIntoEditor(rec);
-            }
-        };
-        leftDock.Children.Add(verGrid);
-        leftGroup.Content = leftDock;
-        Grid.SetColumn(leftGroup, 0);
-        mainGrid.Children.Add(leftGroup);
+        // 左ヘッダー（マクロ名＋控えめな補助ボタン）
+        var leftTop = new Grid { Margin = new Thickness(0, 0, 0, 14) };
+        leftTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        leftTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        // 右カラム：かんたん手順ビルダー
-        var rightScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        var nameBox = CreateCleanTextBox(nameof(MainViewModel.WorkflowNameInput));
+        nameBox.FontSize = 15;
+        nameBox.FontWeight = FontWeights.Bold;
+        Grid.SetColumn(nameBox, 0);
+        leftTop.Children.Add(nameBox);
+
+        var subBtns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(10, 0, 0, 0) };
+        var sampleBtn = CreateButton("サンプル", _accentNeutral, _textSecondary, isCompact: true);
+        sampleBtn.Margin = new Thickness(0, 0, 6, 0);
+        sampleBtn.Click += (_, _) => _vm.LoadSampleMacro();
+        subBtns.Children.Add(sampleBtn);
+
+        var undoBtn = CreateButton("1つ戻す", _accentNeutral, _textSecondary, isCompact: true);
+        undoBtn.Margin = new Thickness(0, 0, 6, 0);
+        undoBtn.Click += (_, _) => _vm.RemoveLastEasyStep();
+        subBtns.Children.Add(undoBtn);
+
+        var clearBtn = CreateButton("クリア", _accentNeutral, _textSecondary, isCompact: true);
+        clearBtn.Click += (_, _) => _vm.ClearEasySteps();
+        subBtns.Children.Add(clearBtn);
+
+        Grid.SetColumn(subBtns, 1);
+        leftTop.Children.Add(subBtns);
+        DockPanel.SetDock(leftTop, Dock.Top);
+        leftDock.Children.Add(leftTop);
+
+        // ステップ一覧（カード風リスト）
+        var stepsGrid = CreateCleanDataGrid();
+        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "#", Binding = new Binding("StepNumber"), Width = 40 });
+        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "操作", Binding = new Binding("FriendlyTitle"), Width = 185 });
+        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "内容", Binding = new Binding("FriendlyDetail"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        stepsGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.EasySteps)));
+        leftDock.Children.Add(stepsGrid);
+
+        leftCard.Child = leftDock;
+        Grid.SetColumn(leftCard, 0);
+        grid.Children.Add(leftCard);
+
+        // 右カード：ステップ追加（選んだ操作に必要な項目だけを表示）＋ AI自動作成
         var rightStack = new StackPanel();
 
-        // マクロ基本情報
-        var nameGroup = new GroupBox
-        {
-            Header = "🏷 マクロの名前",
-            Padding = new Thickness(10),
-            Margin = new Thickness(0, 0, 0, 10),
-            Background = Brushes.White
-        };
-        var namePanel = new DockPanel();
-        namePanel.Children.Add(new TextBlock { Text = "わかりやすい名前：", VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) });
-        var nameBox = new TextBox { Padding = new Thickness(6) };
-        nameBox.SetBinding(TextBox.TextProperty, new Binding(nameof(MainViewModel.WorkflowNameInput)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged });
-        namePanel.Children.Add(nameBox);
-        nameGroup.Content = namePanel;
-        rightStack.Children.Add(nameGroup);
-
-        // ステップ追加フォーム
-        var addGroup = new GroupBox
-        {
-            Header = "➕ やりたい操作を選んで手順に追加（専門知識は不要です）",
-            Padding = new Thickness(12),
-            Margin = new Thickness(0, 0, 0, 10),
-            Background = Brushes.White
-        };
+        var addCard = CreateCard();
         var formStack = new StackPanel();
+        formStack.Children.Add(new TextBlock
+        {
+            Text = "手順を追加",
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 14)
+        });
 
-        formStack.Children.Add(new TextBlock { Text = "① やりたい操作の種類を選んでください：", FontWeight = FontWeights.Bold });
+        formStack.Children.Add(CreateFieldLabel("やりたい操作"));
         var actionCombo = new ComboBox
         {
             DisplayMemberPath = "Value",
             SelectedValuePath = "Key",
-            Margin = new Thickness(0, 4, 0, 10),
-            Padding = new Thickness(6)
+            Padding = new Thickness(10, 8, 10, 8),
+            Margin = new Thickness(0, 0, 0, 14)
         };
         actionCombo.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.AvailableActionKinds)));
         actionCombo.SetBinding(Selector.SelectedValueProperty, new Binding(nameof(MainViewModel.SelectedActionKind)));
+        actionCombo.SelectionChanged += (_, _) =>
+        {
+            if (actionCombo.SelectedValue is string kind)
+            {
+                UpdateInputFieldsVisibility(kind);
+            }
+        };
         formStack.Children.Add(actionCombo);
 
-        // Web操作用入力欄
-        var webWrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
-        webWrap.Children.Add(CreateLabeledTextBox("WebページのURL:", nameof(MainViewModel.StepUrlInput), 280));
-        webWrap.Children.Add(CreateLabeledTextBox("ボタンや入力欄の名前:", nameof(MainViewModel.StepElementNameInput), 180));
-        webWrap.Children.Add(CreateLabeledTextBox("入力する文字:", nameof(MainViewModel.StepFillValueInput), 180));
+        // 動的フィールド群（必要なものだけ表示）
+        _fieldUrlPanel = CreateLabeledInput("URL (Webアドレス)", nameof(MainViewModel.StepUrlInput));
+        _fieldElementPanel = CreateLabeledInput("対象の項目名・ボタン名", nameof(MainViewModel.StepElementNameInput));
+        _fieldValuePanel = CreateLabeledInput("入力する文字", nameof(MainViewModel.StepFillValueInput));
 
-        var pwdCheck = new CheckBox
+        _fieldPasswordCheck = new CheckBox
         {
-            Content = "🔒 パスワードとして保護する",
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(8, 0, 0, 6)
+            Content = "パスワードとして伏せ字で保護する",
+            Foreground = new SolidColorBrush(_textSecondary),
+            Margin = new Thickness(0, 0, 0, 14)
         };
-        pwdCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.StepIsPasswordInput)));
-        webWrap.Children.Add(pwdCheck);
-        formStack.Children.Add(webWrap);
+        _fieldPasswordCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.StepIsPasswordInput)));
 
-        // Excel操作用入力欄
-        var excelWrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 10) };
-        excelWrap.Children.Add(CreateLabeledTextBox("Excelファイル保存先パス:", nameof(MainViewModel.StepExcelPathInput), 320));
-        excelWrap.Children.Add(CreateLabeledTextBox("シート名:", nameof(MainViewModel.StepExcelSheetInput), 100));
-        excelWrap.Children.Add(CreateLabeledTextBox("セル範囲 (例 A1:B2):", nameof(MainViewModel.StepExcelRangeInput), 130));
-        excelWrap.Children.Add(CreateLabeledTextBox("書き込む内容 (カンマ区切り):", nameof(MainViewModel.StepExcelWriteTextInput), 220));
-        formStack.Children.Add(excelWrap);
+        _fieldExcelPathPanel = CreateLabeledInput("Excelファイルの場所", nameof(MainViewModel.StepExcelPathInput));
 
-        var btnBar = new WrapPanel();
-        var addStepBtn = CreateStyledButton("＋ この操作を手順リストに追加する", Color.FromRgb(37, 99, 235));
-        addStepBtn.Click += (_, _) => _vm.AddStepFromBuilderUi();
-        btnBar.Children.Add(addStepBtn);
+        _fieldExcelMetaGrid = new Grid { Margin = new Thickness(0, 0, 0, 12) };
+        _fieldExcelMetaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        _fieldExcelMetaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
+        _fieldExcelMetaGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-        var removeLastBtn = CreateStyledButton("↩ 最後の1つを取り消す", Color.FromRgb(100, 116, 139));
-        removeLastBtn.Click += (_, _) => _vm.RemoveLastEasyStep();
-        btnBar.Children.Add(removeLastBtn);
+        var sheetPanel = CreateLabeledInput("シート名", nameof(MainViewModel.StepExcelSheetInput));
+        sheetPanel.Margin = new Thickness(0);
+        Grid.SetColumn(sheetPanel, 0);
+        _fieldExcelMetaGrid.Children.Add(sheetPanel);
 
-        var clearBtn = CreateStyledButton("🗑 すべてクリア", Color.FromRgb(185, 28, 28));
-        clearBtn.Click += (_, _) => _vm.ClearEasySteps();
-        btnBar.Children.Add(clearBtn);
+        var rangePanel = CreateLabeledInput("セル範囲 (例 A1:B2)", nameof(MainViewModel.StepExcelRangeInput));
+        rangePanel.Margin = new Thickness(0);
+        Grid.SetColumn(rangePanel, 2);
+        _fieldExcelMetaGrid.Children.Add(rangePanel);
 
-        formStack.Children.Add(btnBar);
-        addGroup.Content = formStack;
-        rightStack.Children.Add(addGroup);
+        _fieldExcelWritePanel = CreateLabeledInput("書き込むデータ (カンマ区切り)", nameof(MainViewModel.StepExcelWriteTextInput));
 
-        // 現在の手順リスト
-        var stepsGroup = new GroupBox
+        formStack.Children.Add(_fieldUrlPanel);
+        formStack.Children.Add(_fieldElementPanel);
+        formStack.Children.Add(_fieldValuePanel);
+        formStack.Children.Add(_fieldPasswordCheck);
+        formStack.Children.Add(_fieldExcelPathPanel);
+        formStack.Children.Add(_fieldExcelMetaGrid);
+        formStack.Children.Add(_fieldExcelWritePanel);
+
+        var addBtn = CreateButton("＋ 手順に追加", _accentPrimary, Colors.White, isCompact: false);
+        addBtn.HorizontalAlignment = HorizontalAlignment.Stretch;
+        addBtn.Margin = new Thickness(0, 4, 0, 0);
+        addBtn.Click += (_, _) => _vm.AddStepFromBuilderUi();
+        formStack.Children.Add(addBtn);
+
+        addCard.Child = formStack;
+        rightStack.Children.Add(addCard);
+
+        // AIおまかせ作成ミニカード
+        var aiCard = CreateCard();
+        aiCard.Margin = new Thickness(0, 16, 0, 0);
+        var aiStack = new StackPanel();
+        aiStack.Children.Add(new TextBlock
         {
-            Header = "📋 現在のマクロ手順リスト（上から順番に自動実行されます）",
-            Padding = new Thickness(10),
-            Margin = new Thickness(0, 0, 0, 10),
-            Background = Brushes.White
-        };
-        var stepsGrid = new DataGrid
+            Text = "✨ お手本からAI自動作成",
+            FontSize = 14,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 6)
+        });
+        aiStack.Children.Add(new TextBlock
         {
-            AutoGenerateColumns = false,
-            IsReadOnly = true,
-            Height = 200
+            Text = "今の入力内容をお手本として記録し、AIが安全なマクロに組み立てます。",
+            FontSize = 12,
+            Foreground = new SolidColorBrush(_textSecondary),
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+
+        var aiBtn = CreateButton("🔴 お手本を記録してAI作成", _accentNeutral, _textPrimary, isCompact: false);
+        aiBtn.HorizontalAlignment = HorizontalAlignment.Stretch;
+        aiBtn.Click += async (_, _) =>
+        {
+            _vm.StartEasyRecording();
+            _vm.RecordSimulatedWebOpen();
+            _vm.RecordSimulatedWebInput(asPassword: _vm.StepIsPasswordInput);
+            _vm.RecordSimulatedExcelWrite();
+            _vm.StopEasyRecording();
+            await _vm.GenerateMacroFromRecordingViaAiAsync();
         };
-        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "順番", Binding = new Binding("StepNumber"), Width = 55 });
-        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "やること", Binding = new Binding("FriendlyTitle"), Width = 240 });
-        stepsGrid.Columns.Add(new DataGridTextColumn { Header = "詳しい内容", Binding = new Binding("FriendlyDetail"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        stepsGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.EasySteps)));
-        stepsGroup.Content = stepsGrid;
-        rightStack.Children.Add(stepsGroup);
+        aiStack.Children.Add(aiBtn);
+        aiCard.Child = aiStack;
+        rightStack.Children.Add(aiCard);
+
+        Grid.SetColumn(rightStack, 2);
+        grid.Children.Add(rightStack);
+
+        return new TabItem { Header = "  手順をつくる  ", Content = grid };
+    }
+
+    private TabItem CreateStatusAndSafetyTab()
+    {
+        var grid = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(16) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+        // 上段：実行結果モニター
+        var runCard = CreateCard();
+        var runDock = new DockPanel();
+
+        var runHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
+        var pauseBtn = CreateButton("⏸ 一時停止", _accentNeutral, _textPrimary, isCompact: true);
+        pauseBtn.Margin = new Thickness(0, 0, 8, 0);
+        pauseBtn.Click += (_, _) => _vm.PauseActiveMacro();
+        var resumeBtn = CreateButton("▶ 再開", _accentNeutral, _textPrimary, isCompact: true);
+        resumeBtn.Click += (_, _) => _vm.ResumeActiveMacro();
+
+        var rightCtrls = new StackPanel { Orientation = Orientation.Horizontal };
+        rightCtrls.Children.Add(pauseBtn);
+        rightCtrls.Children.Add(resumeBtn);
+        DockPanel.SetDock(rightCtrls, Dock.Right);
+        runHeader.Children.Add(rightCtrls);
+
+        runHeader.Children.Add(new TextBlock
+        {
+            Text = "実行モニター",
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        DockPanel.SetDock(runHeader, Dock.Top);
+        runDock.Children.Add(runHeader);
+
+        var actGrid = CreateCleanDataGrid();
+        actGrid.Columns.Add(new DataGridTextColumn { Header = "ステップ", Binding = new Binding("NodeId"), Width = 100 });
+        actGrid.Columns.Add(new DataGridTextColumn { Header = "状態", Binding = new Binding("Status"), Width = 120 });
+        actGrid.Columns.Add(new DataGridTextColumn { Header = "メッセージ", Binding = new Binding("LastMessage"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        actGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.CurrentRunActionStatuses)));
+        runDock.Children.Add(actGrid);
+
+        runCard.Child = runDock;
+        Grid.SetRow(runCard, 0);
+        grid.Children.Add(runCard);
+
+        // 下段：安全チェック結果と影響範囲
+        var safetyCard = CreateCard();
+        var safetyDock = new DockPanel();
+        safetyDock.Children.Add(new TextBlock
+        {
+            Text = "安全チェック・影響範囲",
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 12)
+        });
+        DockPanel.SetDock(safetyDock.Children[0], Dock.Top);
+
+        var planGrid = CreateCleanDataGrid();
+        planGrid.Columns.Add(new DataGridTextColumn { Header = "操作", Binding = new Binding("OperationName"), Width = 180 });
+        planGrid.Columns.Add(new DataGridTextColumn { Header = "対象", Binding = new Binding("TargetDescription"), Width = 300 });
+        planGrid.Columns.Add(new DataGridTextColumn { Header = "影響", Binding = new Binding("SideEffectDescription"), Width = 220 });
+        planGrid.Columns.Add(new DataGridTextColumn { Header = "リスク", Binding = new Binding("RiskBadge"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        planGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.FriendlyPlanItems)));
+        safetyDock.Children.Add(planGrid);
+
+        safetyCard.Child = safetyDock;
+        Grid.SetRow(safetyCard, 2);
+        grid.Children.Add(safetyCard);
+
+        return new TabItem { Header = "  確認・結果  ", Content = grid };
+    }
+
+    private TabItem CreateSettingsAndAdvancedTab()
+    {
+        var scroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Margin = new Thickness(0, 12, 0, 0) };
+        var stack = new StackPanel();
+
+        // 基本設定カード
+        var setCard = CreateCard();
+        setCard.Margin = new Thickness(0, 0, 0, 16);
+        var setStack = new StackPanel();
+        setStack.Children.Add(new TextBlock { Text = "動作設定", FontSize = 15, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 12) });
+
+        var browserChk = new CheckBox
+        {
+            Content = "Webページを開くとき、PCの標準ブラウザーも実際に起動する",
+            Margin = new Thickness(0, 0, 0, 10)
+        };
+        browserChk.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.OpenSystemBrowserOnNavigate)));
+        setStack.Children.Add(browserChk);
+
+        var extAiChk = new CheckBox
+        {
+            Content = "外部AIの利用を許可する（OFFのときはPC内のローカルAIのみ使用）",
+            Margin = new Thickness(0, 0, 0, 14)
+        };
+        extAiChk.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.AllowExternalAiPolicy)));
+        setStack.Children.Add(extAiChk);
+
+        var crashSimBtn = CreateButton("異常終了の保護ロックをテストする", _accentNeutral, _textSecondary, isCompact: true);
+        crashSimBtn.HorizontalAlignment = HorizontalAlignment.Left;
+        crashSimBtn.Click += async (_, _) => await _vm.SimulateAbnormalTerminationForDemoAsync();
+        setStack.Children.Add(crashSimBtn);
+
+        setCard.Child = setStack;
+        stack.Children.Add(setCard);
+
+        // 保存済みバージョン一覧カード
+        var verCard = CreateCard();
+        verCard.Margin = new Thickness(0, 0, 0, 16);
+        var verStack = new StackPanel();
+        verStack.Children.Add(new TextBlock { Text = "保存済みマクロ履歴", FontSize = 15, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 10) });
+
+        var verGrid = CreateCleanDataGrid();
+        verGrid.Height = 140;
+        verGrid.Columns.Add(new DataGridTextColumn { Header = "マクロ名", Binding = new Binding("Name"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
+        verGrid.Columns.Add(new DataGridTextColumn { Header = "バージョン", Binding = new Binding("VersionNumber"), Width = 90 });
+        verGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.WorkflowVersions)));
+        verGrid.MouseDoubleClick += (_, _) =>
+        {
+            if (verGrid.SelectedItem is WorkflowVersionRecord rec)
+            {
+                _vm.LoadSelectedVersionIntoEditor(rec);
+                _tabControl.SelectedIndex = 0;
+            }
+        };
+        verStack.Children.Add(verGrid);
+        verCard.Child = verStack;
+        stack.Children.Add(verCard);
 
         // 上級者向けJSON IR折りたたみ
-        var irExpander = new Expander
-        {
-            Header = "🔧 内部データ (Workflow IR v0.7 JSON) を確認・直接編集する（上級者向け）",
-            Background = Brushes.White,
-            Padding = new Thickness(8)
-        };
-        var irDock = new DockPanel();
-        var revalBtn = CreateStyledButton("JSONを再検証する", Color.FromRgb(71, 85, 105));
-        revalBtn.Click += (_, _) => _vm.ValidateCurrentEditorIr();
-        DockPanel.SetDock(revalBtn, Dock.Top);
-        irDock.Children.Add(revalBtn);
-
+        var advCard = CreateCard();
+        var exp = new Expander { Header = "上級者向け：Workflow IR (JSON) と監査ログを表示" };
+        var expStack = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
         var irBox = new TextBox
         {
             AcceptsReturn = true,
-            Height = 180,
+            Height = 140,
+            FontFamily = new FontFamily("Consolas"),
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            FontFamily = new FontFamily("Consolas")
+            Margin = new Thickness(0, 0, 0, 10)
         };
         irBox.SetBinding(TextBox.TextProperty, new Binding(nameof(MainViewModel.EditorIrJson)) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged });
-        irDock.Children.Add(irBox);
-        irExpander.Content = irDock;
-        rightStack.Children.Add(irExpander);
+        expStack.Children.Add(irBox);
 
-        rightScroll.Content = rightStack;
-        Grid.SetColumn(rightScroll, 2);
-        mainGrid.Children.Add(rightScroll);
+        var logGrid = CreateCleanDataGrid();
+        logGrid.Height = 140;
+        logGrid.AutoGenerateColumns = true;
+        logGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.ExecutionHistoryEvents)));
+        expStack.Children.Add(logGrid);
 
-        return new TabItem { Header = "① かんたん作成・編集", Content = mainGrid };
+        exp.Content = expStack;
+        advCard.Child = exp;
+        stack.Children.Add(advCard);
+
+        scroll.Content = stack;
+        return new TabItem { Header = "  設定・詳細  ", Content = scroll };
     }
 
-    private TabItem CreateTab2RecordingAndAi()
+    // 選択した操作に必要な入力欄だけを表示し、不要な項目を隠す
+    private void UpdateInputFieldsVisibility(string actionKind)
     {
-        var stack = new StackPanel { Margin = new Thickness(12) };
+        if (_fieldUrlPanel is null) return;
 
-        var guideGroup = new GroupBox
-        {
-            Header = "🎥 お手本操作を記録してマクロを自動作成する（AI変換 & パスワード自動保護）",
-            Padding = new Thickness(12),
-            Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 12)
-        };
-        var ctrlStack = new StackPanel();
-        ctrlStack.Children.Add(new TextBlock
-        {
-            Text = "「🔴 記録スタート」を押してから操作を行うと、AIが手順を自動で組み立てます。パスワード欄は自動的に伏せ字（[REDACTED]）として安全に保護されます。",
-            Margin = new Thickness(0, 0, 0, 10)
-        });
+        bool isNav = actionKind == IrConstants.ActionChromeNavigate;
+        bool isFill = actionKind == IrConstants.ActionChromeFill;
+        bool isClick = actionKind == IrConstants.ActionChromeClick;
+        bool isSubmit = actionKind == IrConstants.ActionChromeSubmit;
+        bool isExcelRead = actionKind == IrConstants.ActionExcelReadRange;
+        bool isExcelWrite = actionKind == IrConstants.ActionExcelWriteRange;
 
-        var recBtnWrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 10) };
-        var startRecBtn = CreateStyledButton("🔴 記録スタート", Color.FromRgb(220, 38, 38));
-        startRecBtn.Click += (_, _) => _vm.StartEasyRecording();
-        recBtnWrap.Children.Add(startRecBtn);
+        _fieldUrlPanel.Visibility = (isNav || isSubmit) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldElementPanel.Visibility = (isFill || isClick || isSubmit) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldValuePanel.Visibility = isFill ? Visibility.Visible : Visibility.Collapsed;
+        _fieldPasswordCheck.Visibility = isFill ? Visibility.Visible : Visibility.Collapsed;
 
-        var stopRecBtn = CreateStyledButton("⏹ 記録ストップ", Color.FromRgb(71, 85, 105));
-        stopRecBtn.Click += (_, _) => _vm.StopEasyRecording();
-        recBtnWrap.Children.Add(stopRecBtn);
-
-        var simWebBtn = CreateStyledButton("🌐 Webページ移動を記録", Color.FromRgb(37, 99, 235));
-        simWebBtn.Click += (_, _) => _vm.RecordSimulatedWebOpen();
-        recBtnWrap.Children.Add(simWebBtn);
-
-        var simInputBtn = CreateStyledButton("✏️ 文字入力を記録", Color.FromRgb(37, 99, 235));
-        simInputBtn.Click += (_, _) => _vm.RecordSimulatedWebInput(asPassword: false);
-        recBtnWrap.Children.Add(simInputBtn);
-
-        var simPwdBtn = CreateStyledButton("🔒 パスワード入力を記録（自動保護テスト）", Color.FromRgb(147, 51, 234));
-        simPwdBtn.Click += (_, _) => _vm.RecordSimulatedWebInput(asPassword: true);
-        recBtnWrap.Children.Add(simPwdBtn);
-
-        var simExcelBtn = CreateStyledButton("📝 Excel書き込みを記録", Color.FromRgb(22, 163, 74));
-        simExcelBtn.Click += (_, _) => _vm.RecordSimulatedExcelWrite();
-        recBtnWrap.Children.Add(simExcelBtn);
-
-        ctrlStack.Children.Add(recBtnWrap);
-
-        var aiGenBtn = CreateStyledButton("✨ 記録した操作からマクロをAI自動生成する（安全チェック付き）", Color.FromRgb(13, 148, 136));
-        aiGenBtn.Click += async (_, _) =>
-        {
-            await _vm.GenerateMacroFromRecordingViaAiAsync();
-            _mainTabControl.SelectedIndex = 2;
-        };
-        ctrlStack.Children.Add(aiGenBtn);
-
-        guideGroup.Content = ctrlStack;
-        stack.Children.Add(guideGroup);
-
-        var listGroup = new GroupBox
-        {
-            Header = "📜 記録された操作イベント一覧（機密情報は取得段階で除外されています）",
-            Padding = new Thickness(10),
-            Background = Brushes.White
-        };
-        var recGrid = new DataGrid { AutoGenerateColumns = true, IsReadOnly = true, Height = 360 };
-        recGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.RecordedEvents)));
-        listGroup.Content = recGrid;
-        stack.Children.Add(listGroup);
-
-        return new TabItem { Header = "② お手本記録・AI作成", Content = stack };
+        _fieldExcelPathPanel.Visibility = (isExcelRead || isExcelWrite) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldExcelMetaGrid.Visibility = (isExcelRead || isExcelWrite) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldExcelWritePanel.Visibility = isExcelWrite ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private TabItem CreateTab3SafetyAndApproval()
+    private static Border CreateCard()
     {
-        var grid = new Grid { Margin = new Thickness(12) };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        // 上部：ワンクリック承認カード
-        var approveGroup = new GroupBox
+        return new Border
         {
-            Header = "✅ 実行前の最終確認と承認（勝手に危険な操作をしないための安全ロック）",
-            Padding = new Thickness(12),
-            Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 10)
+            Background = new SolidColorBrush(_bgCard),
+            BorderBrush = new SolidColorBrush(_borderSubtle),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(20)
         };
-        var appStack = new StackPanel();
-        var statusTxt = new TextBlock { FontWeight = FontWeights.Bold, FontSize = 14, Margin = new Thickness(0, 0, 0, 8) };
-        statusTxt.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.CurrentApprovalStatusText)));
-        appStack.Children.Add(statusTxt);
-
-        var appInputWrap = new WrapPanel();
-        appInputWrap.Children.Add(CreateLabeledTextBox("承認する人の名前:", nameof(MainViewModel.ApproverNameInput), 180));
-        var highRiskChk = new CheckBox
-        {
-            Content = "外部送信や上書きなどの重要操作も含めて個別に承認する",
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12, 14, 16, 0)
-        };
-        highRiskChk.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.ApproveHighRiskChecked)));
-        appInputWrap.Children.Add(highRiskChk);
-
-        var doApproveBtn = CreateStyledButton("✅ この内容でマクロを承認する", Color.FromRgb(13, 148, 136));
-        doApproveBtn.Click += (_, _) => _vm.ApproveCurrentWorkflow();
-        appInputWrap.Children.Add(doApproveBtn);
-
-        var goRunBtn = CreateStyledButton("▶ 承認して今すぐマクロを実行する", Color.FromRgb(22, 163, 74));
-        goRunBtn.Click += async (_, _) =>
-        {
-            _mainTabControl.SelectedIndex = 3;
-            await _vm.ExecuteOneClickAllInOneAsync();
-        };
-        appInputWrap.Children.Add(goRunBtn);
-
-        appStack.Children.Add(appInputWrap);
-        approveGroup.Content = appStack;
-        Grid.SetRow(approveGroup, 0);
-        grid.Children.Add(approveGroup);
-
-        // 中段：これから行う操作と影響（実行前レビュー）
-        var planGroup = new GroupBox
-        {
-            Header = "🔍 これからマクロが行う操作と安全レベルの一覧（実行前レビュー）",
-            Padding = new Thickness(8),
-            Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 10)
-        };
-        var planGrid = new DataGrid { AutoGenerateColumns = false, IsReadOnly = true };
-        planGrid.Columns.Add(new DataGridTextColumn { Header = "ステップ", Binding = new Binding("NodeId"), Width = 90 });
-        planGrid.Columns.Add(new DataGridTextColumn { Header = "操作の内容", Binding = new Binding("OperationName"), Width = 200 });
-        planGrid.Columns.Add(new DataGridTextColumn { Header = "操作の対象 (URL / Excel範囲)", Binding = new Binding("TargetDescription"), Width = 320 });
-        planGrid.Columns.Add(new DataGridTextColumn { Header = "パソコンや外部への影響", Binding = new Binding("SideEffectDescription"), Width = 220 });
-        planGrid.Columns.Add(new DataGridTextColumn { Header = "リスク判定", Binding = new Binding("RiskBadge"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        planGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.FriendlyPlanItems)));
-        planGroup.Content = planGrid;
-        Grid.SetRow(planGroup, 1);
-        grid.Children.Add(planGroup);
-
-        // 下段：安全チェック結果（問題がある場合のみ具体的理由と直し方を表示）
-        var valGroup = new GroupBox
-        {
-            Header = "🛡️ 安全チェック結果（エラーがある場合はここに理由と直し方が表示されます）",
-            Padding = new Thickness(8),
-            Background = Brushes.White
-        };
-        var valGrid = new DataGrid { AutoGenerateColumns = false, IsReadOnly = true };
-        valGrid.Columns.Add(new DataGridTextColumn { Header = "状態", Binding = new Binding("Severity"), Width = 90 });
-        valGrid.Columns.Add(new DataGridTextColumn { Header = "場所", Binding = new Binding("FriendlyLocation"), Width = 120 });
-        valGrid.Columns.Add(new DataGridTextColumn { Header = "直し方ガイド", Binding = new Binding("HowToFix"), Width = 420 });
-        valGrid.Columns.Add(new DataGridTextColumn { Header = "詳細な理由", Binding = new Binding("FriendlyReason"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        valGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.FriendlyValidationIssues)));
-        valGroup.Content = valGrid;
-        Grid.SetRow(valGroup, 2);
-        grid.Children.Add(valGroup);
-
-        return new TabItem { Header = "③ 安全チェック・承認", Content = grid };
     }
 
-    private TabItem CreateTab4ExecutionMonitor()
+    private static DataGrid CreateCleanDataGrid()
     {
-        var grid = new Grid { Margin = new Thickness(12) };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        var ctrlGroup = new GroupBox
+        return new DataGrid
         {
-            Header = "🎛️ マクロ実行コントロール（実行中いつでも一時停止・安全キャンセルできます）",
-            Padding = new Thickness(12),
+            AutoGenerateColumns = false,
+            IsReadOnly = true,
             Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 12)
+            BorderBrush = new SolidColorBrush(_borderSubtle),
+            BorderThickness = new Thickness(1),
+            GridLinesVisibility = DataGridGridLinesVisibility.Horizontal,
+            HorizontalGridLinesBrush = new SolidColorBrush(_borderSubtle),
+            RowBackground = Brushes.White,
+            AlternatingRowBackground = new SolidColorBrush(_bgCanvas),
+            HeadersVisibility = DataGridHeadersVisibility.Column,
+            RowHeaderWidth = 0,
+            FontSize = 13
         };
-        var btnWrap = new WrapPanel();
-
-        var runBtn = CreateStyledButton("▶ 承認済みマクロを実行開始", Color.FromRgb(22, 163, 74));
-        runBtn.Click += async (_, _) => await _vm.ExecuteApprovedMacroAsync();
-        btnWrap.Children.Add(runBtn);
-
-        var pauseBtn = CreateStyledButton("⏸ 一時停止する", Color.FromRgb(217, 119, 6));
-        pauseBtn.Click += (_, _) => _vm.PauseActiveMacro();
-        btnWrap.Children.Add(pauseBtn);
-
-        var resumeBtn = CreateStyledButton("▶ 再開する", Color.FromRgb(37, 99, 235));
-        resumeBtn.Click += (_, _) => _vm.ResumeActiveMacro();
-        btnWrap.Children.Add(resumeBtn);
-
-        var cancelBtn = CreateStyledButton("⏹ 安全に停止（キャンセル）", Color.FromRgb(220, 38, 38));
-        cancelBtn.Click += (_, _) => _vm.CancelActiveMacro();
-        btnWrap.Children.Add(cancelBtn);
-
-        ctrlGroup.Content = btnWrap;
-        Grid.SetRow(ctrlGroup, 0);
-        grid.Children.Add(ctrlGroup);
-
-        var monGroup = new GroupBox
-        {
-            Header = "📊 各ステップの実行結果・読み戻し確認モニター",
-            Padding = new Thickness(10),
-            Background = Brushes.White
-        };
-        var actGrid = new DataGrid { AutoGenerateColumns = false, IsReadOnly = true };
-        actGrid.Columns.Add(new DataGridTextColumn { Header = "ステップID", Binding = new Binding("NodeId"), Width = 110 });
-        actGrid.Columns.Add(new DataGridTextColumn { Header = "状態", Binding = new Binding("Status"), Width = 120 });
-        actGrid.Columns.Add(new DataGridTextColumn { Header = "試行回数", Binding = new Binding("AttemptCount"), Width = 80 });
-        actGrid.Columns.Add(new DataGridTextColumn { Header = "エラー分類", Binding = new Binding("LastFailureClassification"), Width = 180 });
-        actGrid.Columns.Add(new DataGridTextColumn { Header = "実行結果・確認メッセージ", Binding = new Binding("LastMessage"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
-        actGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.CurrentRunActionStatuses)));
-        monGroup.Content = actGrid;
-        Grid.SetRow(monGroup, 1);
-        grid.Children.Add(monGroup);
-
-        return new TabItem { Header = "④ マクロ実行モニター", Content = grid };
     }
 
-    private TabItem CreateTab5HistoryAndRecovery()
+    private static TextBlock CreateFieldLabel(string text)
     {
-        var grid = new Grid { Margin = new Thickness(12) };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-        // 上段：異常終了・Unknownからのトラブル復旧パネル
-        var recGroup = new GroupBox
+        return new TextBlock
         {
-            Header = "🚑 トラブル復旧パネル（パソコンの電源切れや通信エラーで途中停止したマクロの安全確認）",
-            Padding = new Thickness(12),
-            Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 12)
+            Text = text,
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = new SolidColorBrush(_textSecondary),
+            Margin = new Thickness(0, 0, 0, 6)
         };
-        var recStack = new StackPanel();
-        recStack.Children.Add(new TextBlock
-        {
-            Text = "※ 途中で異常終了したマクロがある場合、二重送信や二重書き込みを防ぐため、確認が終わるまで新しい実行を自動でブロックします。",
-            Margin = new Thickness(0, 0, 0, 8)
-        });
-
-        var recBtnWrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 8) };
-        var resolveFailBtn = CreateStyledButton("✖ 「未完了・中止」として解決しロックを解除する", Color.FromRgb(22, 163, 74));
-        resolveFailBtn.Click += (_, _) => _vm.ResolveFirstPendingRecovery(RecoveryStatus.ResolvedAsFailed, "ユーザーが画面・ファイルを確認し未完了として解決");
-        recBtnWrap.Children.Add(resolveFailBtn);
-
-        var resolveDoneBtn = CreateStyledButton("✔ 「すでに完了していた」として解決しロックを解除する", Color.FromRgb(37, 99, 235));
-        resolveDoneBtn.Click += (_, _) => _vm.ResolveFirstPendingRecovery(RecoveryStatus.ResolvedAsCompleted, "ユーザーが外部システムの完了を確認して解決");
-        recBtnWrap.Children.Add(resolveDoneBtn);
-
-        var simCrashBtn = CreateStyledButton("⚡ 異常終了（停電等）の保護動作をテスト体験する", Color.FromRgb(100, 116, 139));
-        simCrashBtn.Click += async (_, _) => await _vm.SimulateAbnormalTerminationForDemoAsync();
-        recBtnWrap.Children.Add(simCrashBtn);
-
-        recStack.Children.Add(recBtnWrap);
-
-        var pendingGrid = new DataGrid { AutoGenerateColumns = true, IsReadOnly = true, Height = 110 };
-        pendingGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.PendingRecoveries)));
-        recStack.Children.Add(pendingGrid);
-        recGroup.Content = recStack;
-        Grid.SetRow(recGroup, 0);
-        grid.Children.Add(recGroup);
-
-        // 下段：実行履歴と監査イベントログ
-        var histGroup = new GroupBox
-        {
-            Header = "📜 監査・状態遷移ログ（いつ・どのバージョンが・どう動いたかの完全な記録）",
-            Padding = new Thickness(8),
-            Background = Brushes.White
-        };
-        var evGrid = new DataGrid { AutoGenerateColumns = true, IsReadOnly = true };
-        evGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.ExecutionHistoryEvents)));
-        histGroup.Content = evGrid;
-        Grid.SetRow(histGroup, 1);
-        grid.Children.Add(histGroup);
-
-        return new TabItem { Header = "⑤ 実行履歴・トラブル復旧", Content = grid };
     }
 
-    private TabItem CreateTab6Settings()
+    private static TextBox CreateCleanTextBox(string bindingPath)
     {
-        var stack = new StackPanel { Margin = new Thickness(16) };
-
-        var group = new GroupBox
+        var tb = new TextBox
         {
-            Header = "⚙️ 動作モード・AI・セキュリティ設定",
-            Padding = new Thickness(14),
-            Background = Brushes.White,
-            Margin = new Thickness(0, 0, 0, 12)
+            Padding = new Thickness(10, 7, 10, 7),
+            BorderBrush = new SolidColorBrush(_borderSubtle),
+            BorderThickness = new Thickness(1),
+            Background = new SolidColorBrush(_bgCard),
+            Foreground = new SolidColorBrush(_textPrimary)
         };
-        var inner = new StackPanel();
-
-        var browserCheck = new CheckBox
-        {
-            Content = "🌐 Webページを開くステップで、パソコンの標準ブラウザー（Chrome / Edge）も実際に開く",
-            Margin = new Thickness(0, 0, 0, 12),
-            FontWeight = FontWeights.Bold
-        };
-        browserCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.OpenSystemBrowserOnNavigate)));
-        inner.Children.Add(browserCheck);
-
-        inner.Children.Add(new TextBlock { Text = "ローカルAI (Ollama) 接続先URL:" });
-        var endpointBox = new TextBox { Margin = new Thickness(0, 4, 0, 10), Padding = new Thickness(6) };
-        endpointBox.SetBinding(TextBox.TextProperty, new Binding(nameof(MainViewModel.LocalAiEndpoint)));
-        inner.Children.Add(endpointBox);
-
-        inner.Children.Add(new TextBlock { Text = "使用するローカルAIモデル名:" });
-        var modelBox = new TextBox { Margin = new Thickness(0, 4, 0, 12), Padding = new Thickness(6) };
-        modelBox.SetBinding(TextBox.TextProperty, new Binding(nameof(MainViewModel.LocalAiModel)));
-        inner.Children.Add(modelBox);
-
-        var extAiCheck = new CheckBox
-        {
-            Content = "クラウド等の外部AI利用を許可する（OFFの場合はパソコン内のローカルAIのみを使用します）"
-        };
-        extAiCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.AllowExternalAiPolicy)));
-        inner.Children.Add(extAiCheck);
-
-        group.Content = inner;
-        stack.Children.Add(group);
-
-        var aiAuditGroup = new GroupBox
-        {
-            Header = "🤖 AI生成・検証の監査履歴",
-            Padding = new Thickness(10),
-            Background = Brushes.White
-        };
-        var aiGrid = new DataGrid { AutoGenerateColumns = true, IsReadOnly = true, Height = 260 };
-        aiGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.AiAuditLogs)));
-        aiAuditGroup.Content = aiGrid;
-        stack.Children.Add(aiAuditGroup);
-
-        return new TabItem { Header = "⑥ 設定（AI・安全ルール）", Content = stack };
+        tb.SetBinding(TextBox.TextProperty, new Binding(bindingPath) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged });
+        return tb;
     }
 
-    private static Button CreateStyledButton(string text, Color bgColor)
+    private static StackPanel CreateLabeledInput(string label, string bindingPath)
     {
+        var sp = new StackPanel { Margin = new Thickness(0, 0, 0, 12) };
+        sp.Children.Add(CreateFieldLabel(label));
+        sp.Children.Add(CreateCleanTextBox(bindingPath));
+        return sp;
+    }
+
+    private static Button CreateButton(string text, Color bg, Color fg, bool isCompact)
+    {
+        var template = new ControlTemplate(typeof(Button));
+        var borderFactory = new FrameworkElementFactory(typeof(Border));
+        borderFactory.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
+        borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+        borderFactory.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
+
+        var contentFactory = new FrameworkElementFactory(typeof(ContentPresenter));
+        contentFactory.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        contentFactory.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+        borderFactory.AppendChild(contentFactory);
+        template.VisualTree = borderFactory;
+
         return new Button
         {
             Content = text,
-            Background = new SolidColorBrush(bgColor),
-            Foreground = Brushes.White,
-            FontWeight = FontWeights.Bold,
-            Padding = new Thickness(12, 7, 12, 7),
-            Margin = new Thickness(0, 0, 8, 6),
-            BorderThickness = new Thickness(0),
-            Cursor = System.Windows.Input.Cursors.Hand
+            Template = template,
+            Background = new SolidColorBrush(bg),
+            Foreground = new SolidColorBrush(fg),
+            FontWeight = FontWeights.SemiBold,
+            FontSize = isCompact ? 12.5 : 13.5,
+            Padding = isCompact ? new Thickness(12, 6, 12, 6) : new Thickness(18, 10, 18, 10),
+            Cursor = Cursors.Hand
         };
-    }
-
-    private static StackPanel CreateLabeledTextBox(string label, string bindingPath, double width)
-    {
-        var sp = new StackPanel { Margin = new Thickness(0, 0, 10, 6) };
-        sp.Children.Add(new TextBlock { Text = label, FontSize = 12, Margin = new Thickness(0, 0, 0, 2) });
-        var tb = new TextBox { Width = width, Padding = new Thickness(5) };
-        tb.SetBinding(TextBox.TextProperty, new Binding(bindingPath) { UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged });
-        sp.Children.Add(tb);
-        return sp;
     }
 }

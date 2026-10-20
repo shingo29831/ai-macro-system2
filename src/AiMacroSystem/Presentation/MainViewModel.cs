@@ -56,7 +56,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly AiOrchestrator? _aiOrchestrator;
     private readonly LiveChromeBrowserDriver? _liveBrowserDriver;
 
-    private string _statusBanner = "準備完了：左上の「① かんたん作成・編集」または「💡 お試しサンプル読込」から始められます。";
+    private string _statusBanner = "準備完了：「▶ 実行」ですぐに開始できます";
     private string _workflowNameInput = "毎日のWeb入力とExcel転記マクロ";
     private string _workflowIdInput = "wf-daily-routine";
     private string _editorIrJson = string.Empty;
@@ -123,12 +123,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public IReadOnlyList<KeyValuePair<string, string>> AvailableActionKinds { get; } = new[]
     {
-        new KeyValuePair<string, string>(IrConstants.ActionChromeNavigate, "🌐 Webページを開く (Chrome)"),
-        new KeyValuePair<string, string>(IrConstants.ActionChromeFill, "✏️ Webの入力欄に文字を入れる (Chrome)"),
-        new KeyValuePair<string, string>(IrConstants.ActionChromeClick, "👆 Webのボタンをクリックする (Chrome)"),
-        new KeyValuePair<string, string>(IrConstants.ActionChromeSubmit, "📤 Webのフォームを送信する (Chrome)"),
-        new KeyValuePair<string, string>(IrConstants.ActionExcelReadRange, "📖 Excelのセル範囲を読み取る (Excel)"),
-        new KeyValuePair<string, string>(IrConstants.ActionExcelWriteRange, "📝 Excelのセル範囲に書き込む (Excel)")
+        new KeyValuePair<string, string>(IrConstants.ActionChromeNavigate, "🌐 Webページを開く"),
+        new KeyValuePair<string, string>(IrConstants.ActionChromeFill, "✏️ 文字を入力する"),
+        new KeyValuePair<string, string>(IrConstants.ActionChromeClick, "👆 ボタンをクリック"),
+        new KeyValuePair<string, string>(IrConstants.ActionChromeSubmit, "📤 フォームを送信"),
+        new KeyValuePair<string, string>(IrConstants.ActionExcelReadRange, "📖 Excelを読み取る"),
+        new KeyValuePair<string, string>(IrConstants.ActionExcelWriteRange, "📝 Excelに書き込む")
     };
 
     public string StatusBanner
@@ -270,8 +270,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         StatusBanner = PendingRecoveries.Count > 0
-            ? $"⚠️ 【確認が必要です】前回途中で終了したマクロが {PendingRecoveries.Count} 件あります。「⑤ 実行履歴・トラブル復旧」タブで解決するまで新しい実行は安全のためロックされています。"
-            : "🟢 準備完了：サンプルマクロが読み込まれました。「▶ マクロをワンクリック実行（保存＋承認＋実行）」ですぐに試せます！";
+            ? $"⚠️ 前回の異常終了が {PendingRecoveries.Count} 件あります。上部の「ロック解除」を押してください"
+            : "準備完了：「▶ 実行」を押すとマクロが開始されます";
     }
 
     public void LoadSampleMacro()
@@ -325,7 +325,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             excelText: "担当者,結果\n山田 太郎,正常完了");
 
         RebuildIrJsonFromEasySteps();
-        StatusBanner = "💡 お試しサンプルマクロ（4ステップ）を読み込みました。手順の追加や「▶ ワンクリック実行」が可能です。";
+        StatusBanner = "サンプル手順を読み込みました";
     }
 
     public void AddStepFromBuilderUi()
@@ -624,8 +624,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         StatusBanner = CurrentValidationIssues.Count == 0
-            ? $"✅ 安全チェック合格（問題 0 件）：全 {CurrentPlannedActions.Count} ステップの安全性が確認されました。"
-            : $"⚠️ 安全チェックで {CurrentValidationIssues.Count} 件の修正ポイントが見つかりました。「③ 安全チェック・承認」タブを確認してください。";
+            ? $"✅ 安全チェックOK（{CurrentPlannedActions.Count} ステップ）"
+            : $"⚠️ 要確認が {CurrentValidationIssues.Count} 件あります（「確認・結果」タブを参照）";
     }
 
     public void SaveCurrentWorkflowAsVersion()
