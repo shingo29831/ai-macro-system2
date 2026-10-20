@@ -570,7 +570,8 @@ public sealed class IrValidator
             }
 
             bool inThen = thenScope.TryGetValue(nodeId, out var thenOutputs);
-            bool inElse = hasElse && elseScope.TryGetValue(nodeId, out var elseOutputs);
+            Dictionary<string, (string Type, bool IsConditional)>? elseOutputs = null;
+            bool inElse = hasElse && elseScope.TryGetValue(nodeId, out elseOutputs);
 
             var mergedOutputs = new Dictionary<string, (string Type, bool IsConditional)>(StringComparer.Ordinal);
             if (inThen && thenOutputs is not null)
