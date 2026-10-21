@@ -956,6 +956,46 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
+    // 正式版を直接変更せず、エディタ上の一時編集内容からExecutionPlanを作成・再検証・承認して実行する（仕様12）
+    public async Task ExecuteTemporaryEditWithoutCommittingVersionAsync()
+    {
+        ValidateCurrentEditorIr();
+        if (CurrentValidationIssues.Count > 0 || _currentEvaluatedPlan is null)
+        {
+            StatusBanner = "❌ 一時編集内容に検証エラーがあるため実行できません。";
+            return;
+        }
+
+        string baseVerId = _currentSavedVersionId ?? WorkflowVersions.FirstOrDefault()?.VersionId ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(baseVerId))
+        {
+            SaveCurrentWorkflowAsVersion();
+            baseVerId = _currentSavedVersionId!;
+        }
+
+        var (_, def) = new IrValidator().ValidateJson(EditorIrJson);
+        if (def is null) return;
+
+        var (val, tempPlan) = _policyEngine.BuildAndEvaluatePlan(baseVerId, def);
+        if (!val.IsValid || tempPlan is null) return;
+
+        var highRiskNodes = ApproveHighRiskChecked
+            ? tempPlan.PlannedActions.Where(a => a.RequiresIndividualApproval).Select(a => a.NodeId).ToList()
+            : new List<string>();
+
+        var tempApproval = _repository.SaveApproval(
+            baseVerId,
+            tempPlan.PlanHash,
+            string.IsNullOrWhiteSpace(ApproverNameInput) ? "ユーザー本人" : ApproverNameInput.Trim(),
+            ApprovalDecision.Approved,
+            highRiskNodes);
+
+        var execRecord = await _executionEngine.ExecuteTemporaryPlanAsync(tempPlan, tempApproval.ApprovalId);
+        RefreshExecutionMonitor(execRecord.ExecutionId);
+        RefreshAllListsFromDatabase();
+        StatusBanner = $"✅ 正式版を変更せず一時編集プラン({tempPlan.PlanHash[..8]})を再検証・承認して実行しました: {execRecord.Status}";
+    }
+
     public async Task ExecuteApprovedMacroAsync()
     {
         if (_currentSavedVersionId is null || _currentApprovalId is null)

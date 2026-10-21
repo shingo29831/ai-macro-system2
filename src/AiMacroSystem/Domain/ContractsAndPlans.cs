@@ -97,7 +97,8 @@ public sealed record ExecutionRecord(
     string PlanHash,
     ExecutionStatus Status,
     DateTimeOffset StartedAt,
-    DateTimeOffset? EndedAt);
+    DateTimeOffset? EndedAt,
+    string? ApprovalId = null);
 
 public sealed record ActionExecutionRecord(
     string ActionExecutionId,

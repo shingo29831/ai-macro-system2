@@ -79,10 +79,12 @@ public sealed class SqliteRepository
                 ExecutionId TEXT PRIMARY KEY,
                 VersionId TEXT NOT NULL,
                 PlanHash TEXT NOT NULL,
+                ApprovalId TEXT NULL,
                 Status TEXT NOT NULL,
                 StartedAt TEXT NOT NULL,
                 EndedAt TEXT NULL,
-                FOREIGN KEY (VersionId) REFERENCES WorkflowVersions(VersionId)
+                FOREIGN KEY (VersionId) REFERENCES WorkflowVersions(VersionId),
+                FOREIGN KEY (ApprovalId) REFERENCES Approvals(ApprovalId)
             );
 
             CREATE TABLE IF NOT EXISTS ActionExecutions (
@@ -163,8 +165,64 @@ public sealed class SqliteRepository
             BEGIN
                 SELECT RAISE(ABORT, 'Formal WorkflowVersions are immutable.');
             END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_WorkflowVersions_NoDelete
+            BEFORE DELETE ON WorkflowVersions
+            BEGIN
+                SELECT RAISE(ABORT, 'Formal WorkflowVersions cannot be deleted.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_ExecutionEvents_AppendOnly_NoUpdate
+            BEFORE UPDATE ON ExecutionEvents
+            BEGIN
+                SELECT RAISE(ABORT, 'ExecutionEvents are append-only and cannot be updated.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_ExecutionEvents_AppendOnly_NoDelete
+            BEFORE DELETE ON ExecutionEvents
+            BEGIN
+                SELECT RAISE(ABORT, 'ExecutionEvents are append-only and cannot be deleted.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_AiAuditLogs_AppendOnly_NoUpdate
+            BEFORE UPDATE ON AiAuditLogs
+            BEGIN
+                SELECT RAISE(ABORT, 'AiAuditLogs are append-only and cannot be updated.');
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_AiAuditLogs_AppendOnly_NoDelete
+            BEFORE DELETE ON AiAuditLogs
+            BEGIN
+                SELECT RAISE(ABORT, 'AiAuditLogs are append-only and cannot be deleted.');
+            END;
             """;
         cmd.ExecuteNonQuery();
+
+        EnsureApprovalIdColumnExists(conn);
+    }
+
+    private static void EnsureApprovalIdColumnExists(SqliteConnection conn)
+    {
+        using var checkCmd = conn.CreateCommand();
+        checkCmd.CommandText = "PRAGMA table_info(Executions);";
+        bool hasApprovalId = false;
+        using (var reader = checkCmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "ApprovalId", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasApprovalId = true;
+                    break;
+                }
+            }
+        }
+        if (!hasApprovalId)
+        {
+            using var alterCmd = conn.CreateCommand();
+            alterCmd.CommandText = "ALTER TABLE Executions ADD COLUMN ApprovalId TEXT NULL;";
+            alterCmd.ExecuteNonQuery();
+        }
     }
 
     public void VerifyDatabaseIntegrity()
@@ -379,7 +437,7 @@ public sealed class SqliteRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt
+            SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt, ApprovalId
             FROM Executions
             ORDER BY StartedAt DESC;
             """;
@@ -393,7 +451,8 @@ public sealed class SqliteRepository
                 reader.GetString(2),
                 Enum.Parse<ExecutionStatus>(reader.GetString(3)),
                 DateTimeOffset.Parse(reader.GetString(4)),
-                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5))));
+                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
         return list;
     }
@@ -402,6 +461,20 @@ public sealed class SqliteRepository
     {
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
+
+        // 管理上の完全削除時のみ一時的に不変トリガーを解除し、削除後に再設定する
+        string[] preStatements =
+        {
+            "DROP TRIGGER IF EXISTS trg_ExecutionEvents_AppendOnly_NoDelete;",
+            "DROP TRIGGER IF EXISTS trg_WorkflowVersions_NoDelete;"
+        };
+        foreach (string sql in preStatements)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = sql;
+            cmd.ExecuteNonQuery();
+        }
 
         string[] statements =
         {
@@ -422,6 +495,25 @@ public sealed class SqliteRepository
             cmd.CommandText = sql;
             cmd.Parameters.AddWithValue("$wid", workflowId);
             cmd.ExecuteNonQuery();
+        }
+
+        using (var restoreCmd = conn.CreateCommand())
+        {
+            restoreCmd.Transaction = tx;
+            restoreCmd.CommandText = """
+                CREATE TRIGGER IF NOT EXISTS trg_WorkflowVersions_NoDelete
+                BEFORE DELETE ON WorkflowVersions
+                BEGIN
+                    SELECT RAISE(ABORT, 'Formal WorkflowVersions cannot be deleted.');
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS trg_ExecutionEvents_AppendOnly_NoDelete
+                BEFORE DELETE ON ExecutionEvents
+                BEGIN
+                    SELECT RAISE(ABORT, 'ExecutionEvents are append-only and cannot be deleted.');
+                END;
+                """;
+            restoreCmd.ExecuteNonQuery();
         }
 
         tx.Commit();
@@ -508,7 +600,13 @@ public sealed class SqliteRepository
     }
 
     // 状態変更と履歴追記は必ず同一トランザクションで実行する（仕様11.3 / 14.3 / 14.4）
-    public void CreateExecutionAtomic(string executionId, string versionId, string planHash, ExecutionStatus initialStatus, string details)
+    public void CreateExecutionAtomic(
+        string executionId,
+        string versionId,
+        string planHash,
+        ExecutionStatus initialStatus,
+        string details,
+        string? approvalId = null)
     {
         using var conn = OpenConnection();
         using var tx = conn.BeginTransaction();
@@ -518,12 +616,13 @@ public sealed class SqliteRepository
         {
             cmd.Transaction = tx;
             cmd.CommandText = """
-                INSERT INTO Executions (ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt)
-                VALUES ($eid, $vid, $ph, $st, $sat, NULL);
+                INSERT INTO Executions (ExecutionId, VersionId, PlanHash, ApprovalId, Status, StartedAt, EndedAt)
+                VALUES ($eid, $vid, $ph, $aid, $st, $sat, NULL);
                 """;
             cmd.Parameters.AddWithValue("$eid", executionId);
             cmd.Parameters.AddWithValue("$vid", versionId);
             cmd.Parameters.AddWithValue("$ph", planHash);
+            cmd.Parameters.AddWithValue("$aid", (object?)approvalId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$st", initialStatus.ToString());
             cmd.Parameters.AddWithValue("$sat", now.ToString("O"));
             cmd.ExecuteNonQuery();
@@ -662,7 +761,7 @@ public sealed class SqliteRepository
     {
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt FROM Executions WHERE ExecutionId = $eid;";
+        cmd.CommandText = "SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt, ApprovalId FROM Executions WHERE ExecutionId = $eid;";
         cmd.Parameters.AddWithValue("$eid", executionId);
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;
@@ -673,7 +772,8 @@ public sealed class SqliteRepository
             reader.GetString(2),
             Enum.Parse<ExecutionStatus>(reader.GetString(3)),
             DateTimeOffset.Parse(reader.GetString(4)),
-            reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5)));
+            reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5)),
+            reader.IsDBNull(6) ? null : reader.GetString(6));
     }
 
     public IReadOnlyList<ExecutionRecord> GetNonTerminalExecutions()
@@ -681,7 +781,7 @@ public sealed class SqliteRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt
+            SELECT ExecutionId, VersionId, PlanHash, Status, StartedAt, EndedAt, ApprovalId
             FROM Executions
             WHERE Status NOT IN ('Succeeded', 'Failed', 'Cancelled');
             """;
@@ -695,7 +795,8 @@ public sealed class SqliteRepository
                 reader.GetString(2),
                 Enum.Parse<ExecutionStatus>(reader.GetString(3)),
                 DateTimeOffset.Parse(reader.GetString(4)),
-                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5))));
+                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5)),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
         return list;
     }

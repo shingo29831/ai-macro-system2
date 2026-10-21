@@ -711,5 +711,32 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         var storedFormalAfter = _repository.GetVersionById(formalVer.VersionId)!;
         Assert.Contains("alice", storedFormalAfter.IrJson);
         Assert.DoesNotContain("bob-temporary-edit", storedFormalAfter.IrJson);
+
+        // 4. 実行履歴から使用バージョン・承認レコード・状態遷移が完全に追跡可能であること（仕様13・16）
+        Assert.Equal(formalVer.VersionId, succeededTempExec.VersionId);
+        Assert.Equal(tempApproval.ApprovalId, succeededTempExec.ApprovalId);
+        Assert.Equal(tempPlan.PlanHash, succeededTempExec.PlanHash);
+        var events = _repository.GetExecutionEvents(succeededTempExec.ExecutionId);
+        Assert.Contains(events, e => e.EventType == "ExecutionState:Pending->Validating");
+        Assert.Contains(events, e => e.EventType == "ExecutionState:Validating->AwaitingApproval");
+        Assert.Contains(events, e => e.EventType == "ExecutionState:AwaitingApproval->Ready");
+        Assert.Contains(events, e => e.EventType == "ExecutionState:Ready->Running");
+        Assert.Contains(events, e => e.EventType == "ExecutionState:Running->Succeeded");
+
+        // 5. DBレベルで正式バージョン(WorkflowVersions)の更新・削除と監査履歴(ExecutionEvents)の改ざんが禁止されていること
+        using var rawConn = new SqliteConnection($"Data Source={_dbPath}");
+        rawConn.Open();
+        using (var updVerCmd = rawConn.CreateCommand())
+        {
+            updVerCmd.CommandText = "UPDATE WorkflowVersions SET IrJson = '{}' WHERE VersionId = $vid;";
+            updVerCmd.Parameters.AddWithValue("$vid", formalVer.VersionId);
+            Assert.Throws<SqliteException>(() => updVerCmd.ExecuteNonQuery());
+        }
+        using (var delEvCmd = rawConn.CreateCommand())
+        {
+            delEvCmd.CommandText = "DELETE FROM ExecutionEvents WHERE ExecutionId = $eid;";
+            delEvCmd.Parameters.AddWithValue("$eid", succeededTempExec.ExecutionId);
+            Assert.Throws<SqliteException>(() => delEvCmd.ExecuteNonQuery());
+        }
     }
 }

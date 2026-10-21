@@ -119,8 +119,9 @@ public sealed class ExecutionEngine
 
             var (_, plan) = _policyEngine.BuildAndEvaluatePlan(versionId, definition);
             string planHash = plan?.PlanHash ?? "INVALID_PLAN";
+            ApprovalRecord? approval = approvalId is not null ? _repository.GetApprovalById(approvalId) : null;
 
-            _repository.CreateExecutionAtomic(executionId, versionId, planHash, ExecutionStatus.Pending, "Execution accepted in Pending state.");
+            _repository.CreateExecutionAtomic(executionId, versionId, planHash, ExecutionStatus.Pending, "Execution accepted in Pending state.", approval?.ApprovalId);
             lock (_lockSync)
             {
                 _activeExecutionId = executionId;
@@ -138,7 +139,6 @@ public sealed class ExecutionEngine
             // Validating -> AwaitingApproval
             TransitionExecution(executionId, ExecutionStatus.Validating, ExecutionStatus.AwaitingApproval, "Checking approval validity for version and planHash.");
 
-            ApprovalRecord? approval = approvalId is not null ? _repository.GetApprovalById(approvalId) : null;
             var (isApproved, approvalReason) = _approvalService.VerifyApprovalForPlan(plan, approval);
             if (!isApproved)
             {
@@ -216,8 +216,9 @@ public sealed class ExecutionEngine
         {
             var (reval, rebuiltPlan) = _policyEngine.BuildAndEvaluatePlan(temporaryPlan.VersionId, temporaryPlan.Definition);
             string planHash = rebuiltPlan?.PlanHash ?? temporaryPlan.PlanHash;
+            ApprovalRecord? approval = approvalId is not null ? _repository.GetApprovalById(approvalId) : null;
 
-            _repository.CreateExecutionAtomic(executionId, temporaryPlan.VersionId, planHash, ExecutionStatus.Pending, "Temporary edit execution accepted in Pending state.");
+            _repository.CreateExecutionAtomic(executionId, temporaryPlan.VersionId, planHash, ExecutionStatus.Pending, "Temporary edit execution accepted in Pending state.", approval?.ApprovalId);
             lock (_lockSync)
             {
                 _activeExecutionId = executionId;
@@ -231,7 +232,6 @@ public sealed class ExecutionEngine
             }
 
             TransitionExecution(executionId, ExecutionStatus.Validating, ExecutionStatus.AwaitingApproval, "Checking approval validity for temporary edit planHash.");
-            ApprovalRecord? approval = approvalId is not null ? _repository.GetApprovalById(approvalId) : null;
             var (isApproved, approvalReason) = _approvalService.VerifyApprovalForPlan(rebuiltPlan, approval);
             if (!isApproved)
             {

@@ -717,14 +717,15 @@ public sealed class MainWindow : Window
 
         var execListCard = CreateCard();
         var execListDock = new DockPanel();
-        execListDock.Children.Add(new TextBlock { Text = "実行履歴一覧 (バージョン・計画ハッシュ追跡)", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 6) });
+        execListDock.Children.Add(new TextBlock { Text = "実行履歴一覧 (バージョン・承認ID・計画ハッシュ追跡)", FontSize = 13, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 6) });
         DockPanel.SetDock(execListDock.Children[0], Dock.Top);
 
         var execGrid = CreateCleanDataGrid();
-        execGrid.Columns.Add(new DataGridTextColumn { Header = "Execution ID", Binding = new Binding("ExecutionId"), Width = 140 });
-        execGrid.Columns.Add(new DataGridTextColumn { Header = "Version ID", Binding = new Binding("VersionId"), Width = 120 });
-        execGrid.Columns.Add(new DataGridTextColumn { Header = "終端状態", Binding = new Binding("Status"), Width = 95 });
-        execGrid.Columns.Add(new DataGridTextColumn { Header = "開始時刻", Binding = new Binding("StartedAt") { StringFormat = "HH:mm:ss" }, Width = 80 });
+        execGrid.Columns.Add(new DataGridTextColumn { Header = "Execution ID", Binding = new Binding("ExecutionId"), Width = 130 });
+        execGrid.Columns.Add(new DataGridTextColumn { Header = "Version ID", Binding = new Binding("VersionId"), Width = 110 });
+        execGrid.Columns.Add(new DataGridTextColumn { Header = "Approval ID", Binding = new Binding("ApprovalId"), Width = 110 });
+        execGrid.Columns.Add(new DataGridTextColumn { Header = "終端状態", Binding = new Binding("Status"), Width = 85 });
+        execGrid.Columns.Add(new DataGridTextColumn { Header = "開始時刻", Binding = new Binding("StartedAt") { StringFormat = "HH:mm:ss" }, Width = 75 });
         execGrid.SetBinding(ItemsControl.ItemsSourceProperty, new Binding(nameof(MainViewModel.AllExecutions)));
         execGrid.SelectionChanged += (_, _) =>
         {
