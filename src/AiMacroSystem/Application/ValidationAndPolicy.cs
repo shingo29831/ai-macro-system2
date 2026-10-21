@@ -248,10 +248,36 @@ public sealed class IrValidator
             return result;
         }
 
+        foreach (var origin in definition.Policy.AllowedOrigins)
+        {
+            if (!string.Equals(origin.Scheme, "https", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(origin.Scheme, "http", StringComparison.OrdinalIgnoreCase))
+            {
+                result.AddIssue(ValidationStage.JsonSchema, "ORIGIN_SCHEME_INVALID", $"Origin scheme '{origin.Scheme}' must be 'https' or 'http'.");
+            }
+            if (string.IsNullOrWhiteSpace(origin.Host))
+            {
+                result.AddIssue(ValidationStage.JsonSchema, "ORIGIN_HOST_EMPTY", "Origin host cannot be empty.");
+            }
+            if (origin.Port is < 1 or > 65535)
+            {
+                result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "ORIGIN_PORT_OUT_OF_RANGE", $"Origin port '{origin.Port}' must be between 1 and 65535.");
+            }
+        }
+
         var nodeIds = new HashSet<string>(StringComparer.Ordinal);
         var scopeOutputs = new Dictionary<string, Dictionary<string, (string Type, bool IsConditional)>>(StringComparer.Ordinal);
 
         ValidateNodeRecursive(definition.Root, definition.Policy, nodeIds, scopeOutputs, isInsideLoop: false, result);
+
+        // 仕様7の8段階検証順序（構文→Schema→引数型・値域→参照・スコープ→制御フロー→前提・事後条件→対象・許可範囲→副作用・リスク・ポリシー）に整列する
+        if (result.Issues.Count > 1)
+        {
+            var ordered = result.Issues.OrderBy(i => (int)i.Stage).ToList();
+            result.Issues.Clear();
+            result.Issues.AddRange(ordered);
+        }
+
         return result;
     }
 
@@ -512,11 +538,16 @@ public sealed class IrValidator
 
         JsonElement argsElement = node.Args.Value;
 
+        bool argsDeserialized = true;
         switch (node.ActionType)
         {
             case IrConstants.ActionChromeNavigate:
             {
-                var args = argsElement.Deserialize<ChromeNavigateArgs>();
+                if (!TryDeserializeArgs<ChromeNavigateArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
                 if (args is null || string.IsNullOrWhiteSpace(args.Url) || !Uri.TryCreate(args.Url, UriKind.Absolute, out Uri? uri))
                 {
                     result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "CHROME_NAV_URL_INVALID", "Chrome.Navigate requires a valid absolute URL.", node.NodeId);
@@ -529,13 +560,21 @@ public sealed class IrValidator
             }
             case IrConstants.ActionChromeClick:
             {
-                var args = argsElement.Deserialize<ChromeClickArgs>();
+                if (!TryDeserializeArgs<ChromeClickArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
                 ValidateLocator(args?.Locator, policy, node.NodeId, result);
                 break;
             }
             case IrConstants.ActionChromeFill:
             {
-                var args = argsElement.Deserialize<ChromeFillArgs>();
+                if (!TryDeserializeArgs<ChromeFillArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
                 ValidateLocator(args?.Locator, policy, node.NodeId, result);
                 if (args is null || (string.IsNullOrEmpty(args.Value) && args.ValueRef is null))
                 {
@@ -553,7 +592,11 @@ public sealed class IrValidator
             }
             case IrConstants.ActionChromeSubmit:
             {
-                var args = argsElement.Deserialize<ChromeSubmitArgs>();
+                if (!TryDeserializeArgs<ChromeSubmitArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
                 ValidateLocator(args?.Locator, policy, node.NodeId, result);
                 if (args is null || string.IsNullOrWhiteSpace(args.ExpectedSuccessSelector))
                 {
@@ -570,14 +613,22 @@ public sealed class IrValidator
             }
             case IrConstants.ActionExcelReadRange:
             {
-                var args = argsElement.Deserialize<ExcelReadRangeArgs>();
-                ValidateExcelTarget(args?.WorkbookPath, args?.SheetName, args?.RangeAddress, node.NodeId, result);
+                if (!TryDeserializeArgs<ExcelReadRangeArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
+                ValidateExcelTarget(args?.WorkbookPath, args?.SheetName, args?.RangeAddress, policy, node.NodeId, result);
                 break;
             }
             case IrConstants.ActionExcelWriteRange:
             {
-                var args = argsElement.Deserialize<ExcelWriteRangeArgs>();
-                ValidateExcelTarget(args?.WorkbookPath, args?.SheetName, args?.RangeAddress, node.NodeId, result);
+                if (!TryDeserializeArgs<ExcelWriteRangeArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
+                ValidateExcelTarget(args?.WorkbookPath, args?.SheetName, args?.RangeAddress, policy, node.NodeId, result);
                 bool hasStaticValues = args?.Values is { Count: > 0 } && args.Values.All(r => r.Count > 0);
                 if (!hasStaticValues && args?.ValuesRef is null)
                 {
@@ -606,6 +657,19 @@ public sealed class IrValidator
                     }
                 }
                 break;
+            }
+        }
+
+        if (argsDeserialized)
+        {
+            var (_, evaluatedRisk, targetSummary, _) = PolicyEngine.EvaluateActionRiskAndTarget(node, contract, policy);
+            if (evaluatedRisk == RiskLevel.Prohibited)
+            {
+                result.AddIssue(
+                    ValidationStage.SideEffectsRiskAndPolicy,
+                    "POLICY_PROHIBITED_OPERATION",
+                    $"Action '{node.NodeId}' ({node.ActionType}) is evaluated as Prohibited on target '{targetSummary}'.",
+                    node.NodeId);
             }
         }
 
@@ -682,12 +746,36 @@ public sealed class IrValidator
         }
     }
 
-    private static void ValidateExcelTarget(string? workbookPath, string? sheetName, string? rangeAddress, string nodeId, ValidationResult result)
+    private static bool TryDeserializeArgs<T>(JsonElement element, string nodeId, ValidationResult result, out T? args)
+    {
+        try
+        {
+            args = element.Deserialize<T>();
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            args = default;
+            result.AddIssue(
+                ValidationStage.ArgumentTypesAndRanges,
+                "ACTION_ARGS_TYPE_MISMATCH",
+                $"Action arguments type mismatch: {ex.Message}",
+                nodeId);
+            return false;
+        }
+    }
+
+    private static void ValidateExcelTarget(string? workbookPath, string? sheetName, string? rangeAddress, PolicyDeclaration policy, string nodeId, ValidationResult result)
     {
         if (string.IsNullOrWhiteSpace(workbookPath) || workbookPath.Equals("ActiveWorkbook", StringComparison.OrdinalIgnoreCase))
         {
             result.AddIssue(ValidationStage.TargetAndAllowedScope, "EXCEL_WORKBOOK_IMPLICIT_OR_EMPTY", "Excel action requires an explicit workbookPath; implicit ActiveWorkbook is prohibited.", nodeId);
         }
+        else if (!PolicyEngine.IsPathAllowed(workbookPath, policy.AllowedExcelDirectories))
+        {
+            result.AddIssue(ValidationStage.TargetAndAllowedScope, "EXCEL_PATH_NOT_ALLOWED", $"Excel workbook path '{workbookPath}' is outside policy allowedExcelDirectories.", nodeId);
+        }
+
         if (string.IsNullOrWhiteSpace(sheetName) || sheetName.Equals("ActiveSheet", StringComparison.OrdinalIgnoreCase))
         {
             result.AddIssue(ValidationStage.TargetAndAllowedScope, "EXCEL_SHEET_IMPLICIT_OR_EMPTY", "Excel action requires an explicit sheetName; implicit ActiveSheet is prohibited.", nodeId);
@@ -921,7 +1009,7 @@ public sealed class PolicyEngine
         return (true, string.Empty);
     }
 
-    private static (SideEffectKind SideEffects, RiskLevel Risk, string TargetSummary, string InputSummary) EvaluateActionRiskAndTarget(
+    internal static (SideEffectKind SideEffects, RiskLevel Risk, string TargetSummary, string InputSummary) EvaluateActionRiskAndTarget(
         WorkflowNode node,
         ActionContract contract,
         PolicyDeclaration policy)

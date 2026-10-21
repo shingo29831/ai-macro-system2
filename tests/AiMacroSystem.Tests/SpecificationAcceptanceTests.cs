@@ -576,4 +576,74 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         await vm.ExecuteOneClickAllInOneAsync();
         Assert.Equal(ExecutionStatus.Succeeded, vm.AllExecutions[0].Status);
     }
+
+    [Fact]
+    public async Task Section18_12_ControlFlow_TemporaryEditPlan_Traceability_AndLocatorPriority()
+    {
+        // 1. ロケーター優先順位（①Role+AccessibleName → ②Label → ③StableId → ④CssSelector → ⑤Coordinates）の検証
+        var locator = new SemanticLocator
+        {
+            Role = "button",
+            AccessibleName = "SubmitOrder",
+            Label = "FallbackLabel",
+            StableId = "btn-submit",
+            CssSelector = "#submit"
+        };
+        Assert.Equal(("RoleAndAccessibleName", "button:SubmitOrder"), locator.ResolveByPriority());
+
+        var cssOnlyLocator = new SemanticLocator { CssSelector = "#only-css" };
+        Assert.Equal(("CssSelector", "#only-css"), cssOnlyLocator.ResolveByPriority());
+
+        // 2. 生イベント → 正規化アクション → IRノード の追跡可能性（仕様6）
+        var recorder = new RecordingService(_repository);
+        var normalizer = new NormalizationService(_repository);
+        recorder.StartRecording();
+        var rawEv = recorder.RecordEvent("Chrome", "Navigate", null, null, null, null, null, "[https://example.com/trace](https://example.com/trace)", null, null, null);
+        recorder.StopRecording();
+
+        var candidates = normalizer.Normalize(new[] { rawEv });
+        var actionNode = new ActionNode
+        {
+            NodeId = "trace-nav",
+            ActionType = IrConstants.ActionChromeNavigate,
+            SourceCandidateIds = new List<string> { candidates[0].CandidateId },
+            Args = JsonSerializer.SerializeToElement(new ChromeNavigateArgs { Url = "[https://example.com/trace](https://example.com/trace)" })
+        };
+
+        var tracedRawEvents = _workflowService.TraceNodeToRawEvents(actionNode);
+        Assert.Single(tracedRawEvents);
+        Assert.Equal(rawEv.EventId, tracedRawEvents[0].EventId);
+
+        // 3. 正式版を変更しない一時編集のExecutionPlan再検証・旧承認無効化・再承認後の実行（仕様12）
+        var baseDef = CreateValidSampleDefinition();
+        baseDef.WorkflowId = "wf-temp-edit";
+        var formalVer = _workflowService.CreateInitialWorkflow(baseDef);
+        var (_, formalPlan) = _policyEngine.BuildAndEvaluatePlan(formalVer.VersionId, baseDef);
+        var formalApproval = _repository.SaveApproval(formalVer.VersionId, formalPlan!.PlanHash, "user", ApprovalDecision.Approved, Array.Empty<string>());
+
+        var tempEditedDef = CreateValidSampleDefinition();
+        tempEditedDef.WorkflowId = "wf-temp-edit";
+        tempEditedDef.Root!.Children![1].Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
+        {
+            Locator = new SemanticLocator { Role = "textbox", AccessibleName = "Username" },
+            Value = "bob-temporary-edit"
+        });
+
+        var (tempVal, tempPlan) = _policyEngine.BuildAndEvaluatePlan(formalVer.VersionId, tempEditedDef);
+        Assert.True(tempVal.IsValid);
+        Assert.NotEqual(formalPlan.PlanHash, tempPlan!.PlanHash);
+
+        // 旧承認では一時編集プランを実行できないことを確認
+        var rejectedTempExec = await _executionEngine.ExecuteTemporaryPlanAsync(tempPlan, formalApproval.ApprovalId);
+        Assert.Equal(ExecutionStatus.Failed, rejectedTempExec.Status);
+
+        // 一時編集プランに対する承認を取得して実行すると成功し、DB上の正式版IRは不変のままであることを確認
+        var tempApproval = _repository.SaveApproval(formalVer.VersionId, tempPlan.PlanHash, "user", ApprovalDecision.Approved, Array.Empty<string>());
+        var succeededTempExec = await _executionEngine.ExecuteTemporaryPlanAsync(tempPlan, tempApproval.ApprovalId);
+        Assert.Equal(ExecutionStatus.Succeeded, succeededTempExec.Status);
+
+        var storedFormalAfter = _repository.GetVersionById(formalVer.VersionId)!;
+        Assert.Contains("alice", storedFormalAfter.IrJson);
+        Assert.DoesNotContain("bob-temporary-edit", storedFormalAfter.IrJson);
+    }
 }

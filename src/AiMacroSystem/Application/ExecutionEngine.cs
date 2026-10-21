@@ -152,6 +152,13 @@ public sealed class ExecutionEngine
 
             await ExecuteNodeRecursiveAsync(executionId, definition.Root!, definition.Policy, plan, runtimeOutputs, outcomeFlags, ct);
 
+            if ((_cancelRequested || ct.IsCancellationRequested) && !outcomeFlags.CancelConfirmedLogged)
+            {
+                outcomeFlags.WasCancelled = true;
+                outcomeFlags.CancelConfirmedLogged = true;
+                _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed after action completion.");
+            }
+
             ExecutionStatus currentExecStatus = _repository.GetExecutionById(executionId)!.Status;
             ExecutionStatus finalStatus = ExecutionStateMachine.ResolveCompetingTerminal(
                 cancelRequested: _cancelRequested || outcomeFlags.WasCancelled,
@@ -180,11 +187,102 @@ public sealed class ExecutionEngine
         }
     }
 
+    // 正式版を直接変更しない一時編集のExecutionPlanを再検証・承認確認して実行する（仕様12）
+    public async Task<ExecutionRecord> ExecuteTemporaryPlanAsync(
+        ExecutionPlan temporaryPlan,
+        string? approvalId,
+        CancellationToken ct = default)
+    {
+        lock (_lockSync)
+        {
+            if (_recoveryService.HasUnresolvedRecovery())
+            {
+                throw new InvalidOperationException("New workflow execution is prohibited until startup recovery verification and user decision are completed.");
+            }
+            if (_activeExecutionId is not null)
+            {
+                throw new InvalidOperationException($"Another workflow execution ('{_activeExecutionId}') is already active or paused. Concurrent execution is prohibited.");
+            }
+            _pauseRequested = false;
+            _cancelRequested = false;
+            _activeExecutionId = "RESERVING";
+        }
+
+        string executionId = $"exec-{Guid.NewGuid():N}";
+        try
+        {
+            var (reval, rebuiltPlan) = _policyEngine.BuildAndEvaluatePlan(temporaryPlan.VersionId, temporaryPlan.Definition);
+            string planHash = rebuiltPlan?.PlanHash ?? temporaryPlan.PlanHash;
+
+            _repository.CreateExecutionAtomic(executionId, temporaryPlan.VersionId, planHash, ExecutionStatus.Pending, "Temporary edit execution accepted in Pending state.");
+            lock (_lockSync)
+            {
+                _activeExecutionId = executionId;
+            }
+
+            TransitionExecution(executionId, ExecutionStatus.Pending, ExecutionStatus.Validating, "Re-validating temporary edit ExecutionPlan and Policy.");
+            if (!reval.IsValid || rebuiltPlan is null || !string.Equals(rebuiltPlan.PlanHash, temporaryPlan.PlanHash, StringComparison.Ordinal))
+            {
+                TransitionExecution(executionId, ExecutionStatus.Validating, ExecutionStatus.Failed, "Temporary edit execution plan validation failed.", ended: true);
+                return _repository.GetExecutionById(executionId)!;
+            }
+
+            TransitionExecution(executionId, ExecutionStatus.Validating, ExecutionStatus.AwaitingApproval, "Checking approval validity for temporary edit planHash.");
+            ApprovalRecord? approval = approvalId is not null ? _repository.GetApprovalById(approvalId) : null;
+            var (isApproved, approvalReason) = _approvalService.VerifyApprovalForPlan(rebuiltPlan, approval);
+            if (!isApproved)
+            {
+                TransitionExecution(executionId, ExecutionStatus.AwaitingApproval, ExecutionStatus.Failed, $"Approval check failed: {approvalReason}", ended: true);
+                return _repository.GetExecutionById(executionId)!;
+            }
+
+            TransitionExecution(executionId, ExecutionStatus.AwaitingApproval, ExecutionStatus.Ready, "Temporary edit validation and approval verified.");
+            TransitionExecution(executionId, ExecutionStatus.Ready, ExecutionStatus.Running, "Starting sequential execution of temporary edit plan.");
+
+            var runtimeOutputs = new Dictionary<string, IReadOnlyDictionary<string, object?>>(StringComparer.Ordinal);
+            var outcomeFlags = new ExecutionOutcomeFlags();
+
+            await ExecuteNodeRecursiveAsync(executionId, rebuiltPlan.Definition.Root!, rebuiltPlan.Definition.Policy, rebuiltPlan, runtimeOutputs, outcomeFlags, ct);
+
+            if ((_cancelRequested || ct.IsCancellationRequested) && !outcomeFlags.CancelConfirmedLogged)
+            {
+                outcomeFlags.WasCancelled = true;
+                outcomeFlags.CancelConfirmedLogged = true;
+                _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed after action completion.");
+            }
+
+            ExecutionStatus currentExecStatus = _repository.GetExecutionById(executionId)!.Status;
+            ExecutionStatus finalStatus = ExecutionStateMachine.ResolveCompetingTerminal(
+                cancelRequested: _cancelRequested || outcomeFlags.WasCancelled,
+                hasUnknownAction: outcomeFlags.HasUnknown,
+                hasFailedAction: outcomeFlags.HasFailed);
+
+            TransitionExecution(executionId, currentExecStatus, finalStatus, $"Execution finished with status '{finalStatus}'.", ended: true);
+            if (finalStatus == ExecutionStatus.Unknown)
+            {
+                _repository.CreateRecoveryRecord(executionId, RecoveryStatus.Pending, "Execution ended in Unknown state due to uncertain external side effect.");
+            }
+
+            return _repository.GetExecutionById(executionId)!;
+        }
+        finally
+        {
+            lock (_lockSync)
+            {
+                _activeExecutionId = null;
+                _pauseRequested = false;
+                _cancelRequested = false;
+                _resumeSignal = null;
+            }
+        }
+    }
+
     private sealed class ExecutionOutcomeFlags
     {
         public bool HasFailed { get; set; }
         public bool HasUnknown { get; set; }
         public bool WasCancelled { get; set; }
+        public bool CancelConfirmedLogged { get; set; }
 
         public bool ShouldStop => HasFailed || HasUnknown || WasCancelled;
     }
@@ -331,7 +429,35 @@ public sealed class ExecutionEngine
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(contract.Timeout);
 
-            AdapterExecutionResult result = await adapter.ExecuteAsync(node, policy, runtimeOutputs, timeoutCts.Token);
+            AdapterExecutionResult result;
+            try
+            {
+                result = await adapter.ExecuteAsync(node, policy, runtimeOutputs, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (_cancelRequested || ct.IsCancellationRequested)
+            {
+                // 実行中の中断で副作用がある操作は成否不明(Unknown)を優先する（仕様11）
+                if (contract.DeclaredSideEffects == SideEffectKind.Read)
+                {
+                    ActionStateMachine.EnsureValidTransition(currentActionStatus, ActionExecutionStatus.Cancelled);
+                    _repository.UpdateActionStateAtomic(executionId, actionExecutionId, ActionExecutionStatus.Cancelled, attempt, FailureClassification.CancelledByUser, "Read-only action cancelled safely.", "ActionCancelled");
+                    flags.WasCancelled = true;
+                }
+                else
+                {
+                    ActionStateMachine.EnsureValidTransition(currentActionStatus, ActionExecutionStatus.Unknown);
+                    _repository.UpdateActionStateAtomic(executionId, actionExecutionId, ActionExecutionStatus.Unknown, attempt, FailureClassification.ExternalOutcomeUnknown, "Side-effecting action interrupted by cancellation; external outcome is unknown.", "ActionOutcomeUnknown");
+                    flags.HasUnknown = true;
+                }
+                break;
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+            {
+                // timeout超過時は読み取り専用なら一時エラー、副作用操作ならUnknownとする（仕様5）
+                result = contract.DeclaredSideEffects == SideEffectKind.Read
+                    ? AdapterExecutionResult.Failed(FailureClassification.TransientError, $"Action timed out after {contract.Timeout.TotalSeconds}s.", sideEffectCommitted: false)
+                    : AdapterExecutionResult.Unknown($"Action timed out after {contract.Timeout.TotalSeconds}s; side-effect outcome is unknown.");
+            }
 
             if (result.Status == ActionExecutionStatus.Succeeded)
             {
@@ -402,6 +528,7 @@ public sealed class ExecutionEngine
         if (_cancelRequested || ct.IsCancellationRequested)
         {
             flags.WasCancelled = true;
+            flags.CancelConfirmedLogged = true;
             _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed at action boundary.");
             return;
         }
@@ -423,6 +550,7 @@ public sealed class ExecutionEngine
             if (!resumed || _cancelRequested || ct.IsCancellationRequested)
             {
                 flags.WasCancelled = true;
+                flags.CancelConfirmedLogged = true;
                 _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed while paused.");
                 return;
             }

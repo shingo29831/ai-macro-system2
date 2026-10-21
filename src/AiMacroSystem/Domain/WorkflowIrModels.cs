@@ -115,7 +115,7 @@ public sealed class ConditionExpression
     public string? RightLiteral { get; set; }
 }
 
-public sealed class WorkflowNode
+public class WorkflowNode
 {
     [JsonPropertyName("nodeId")]
     public string NodeId { get; set; } = string.Empty;
@@ -160,6 +160,31 @@ public sealed class WorkflowNode
     public List<string>? SourceCandidateIds { get; set; }
 }
 
+public sealed class SequenceNode : WorkflowNode
+{
+    public SequenceNode() => Type = IrConstants.NodeTypeSequence;
+}
+
+public sealed class IfNode : WorkflowNode
+{
+    public IfNode() => Type = IrConstants.NodeTypeIf;
+}
+
+public sealed class ForEachNode : WorkflowNode
+{
+    public ForEachNode() => Type = IrConstants.NodeTypeForEach;
+}
+
+public sealed class WhileNode : WorkflowNode
+{
+    public WhileNode() => Type = IrConstants.NodeTypeWhile;
+}
+
+public sealed class ActionNode : WorkflowNode
+{
+    public ActionNode() => Type = IrConstants.NodeTypeAction;
+}
+
 public sealed class SemanticLocator
 {
     [JsonPropertyName("role")]
@@ -191,6 +216,32 @@ public sealed class SemanticLocator
 
     public bool UsesCoordinatesOnly() =>
         !HasSemanticTarget() && CoordinateX.HasValue && CoordinateY.HasValue;
+
+    // 仕様9の優先順位（①Role+AccessibleName→②Label→③StableId→④CssSelector→⑤座標）で対象識別子を解決する
+    public (string Strategy, string Key) ResolveByPriority()
+    {
+        if (!string.IsNullOrWhiteSpace(Role) && !string.IsNullOrWhiteSpace(AccessibleName))
+        {
+            return ("RoleAndAccessibleName", $"{Role}:{AccessibleName}");
+        }
+        if (!string.IsNullOrWhiteSpace(Label))
+        {
+            return ("Label", Label);
+        }
+        if (!string.IsNullOrWhiteSpace(StableId))
+        {
+            return ("StableId", StableId);
+        }
+        if (!string.IsNullOrWhiteSpace(CssSelector))
+        {
+            return ("CssSelector", CssSelector);
+        }
+        if (CoordinateX.HasValue && CoordinateY.HasValue)
+        {
+            return ("Coordinates", $"{CoordinateX.Value},{CoordinateY.Value}");
+        }
+        return ("Unresolved", string.Empty);
+    }
 }
 
 public sealed class ChromeNavigateArgs

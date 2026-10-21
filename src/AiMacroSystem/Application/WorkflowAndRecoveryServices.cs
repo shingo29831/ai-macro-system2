@@ -72,17 +72,52 @@ public sealed class WorkflowManagementService
 
         return _repository.CommitNewVersionFromDraft(draft.DraftId, draft.WorkflowId, definition.Name, nextVersionNumber, canonicalJson, definition.SchemaVersion);
     }
+
+    // 生イベント → 正規化アクション候補 → IRノードの対応関係を追跡する（仕様6）
+    public IReadOnlyList<RawRecordedEvent> TraceNodeToRawEvents(WorkflowNode node)
+    {
+        if (node.SourceCandidateIds is null || node.SourceCandidateIds.Count == 0)
+        {
+            return Array.Empty<RawRecordedEvent>();
+        }
+
+        var candidateMap = _repository.GetNormalizedCandidates()
+            .ToDictionary(c => c.CandidateId, StringComparer.Ordinal);
+        var rawEventMap = _repository.GetRawRecordedEvents()
+            .ToDictionary(e => e.EventId, StringComparer.Ordinal);
+
+        var tracedEvents = new List<RawRecordedEvent>();
+        foreach (string candId in node.SourceCandidateIds)
+        {
+            if (candidateMap.TryGetValue(candId, out var cand))
+            {
+                foreach (string rawId in cand.SourceRawEventIds)
+                {
+                    if (rawEventMap.TryGetValue(rawId, out var rawEv))
+                    {
+                        tracedEvents.Add(rawEv);
+                    }
+                }
+            }
+        }
+        return tracedEvents;
+    }
 }
 
 public sealed class RecoveryService
 {
     private readonly SqliteRepository _repository;
     private readonly IReadOnlyDictionary<string, IActionAdapter> _adapters;
+    private readonly PolicyEngine _policyEngine;
 
-    public RecoveryService(SqliteRepository repository, IReadOnlyDictionary<string, IActionAdapter> adapters)
+    public RecoveryService(
+        SqliteRepository repository,
+        IReadOnlyDictionary<string, IActionAdapter> adapters,
+        PolicyEngine? policyEngine = null)
     {
         _repository = repository;
         _adapters = adapters;
+        _policyEngine = policyEngine ?? new PolicyEngine(new IrValidator());
     }
 
     public bool HasUnresolvedRecovery() =>
@@ -179,6 +214,22 @@ public sealed class RecoveryService
                     endedAt: DateTimeOffset.UtcNow);
             }
 
+            // 起動時復旧Step 6: 承認済みバージョン・実行計画・許可範囲を再確認し差異があれば記録する
+            bool planVerified = false;
+            if (version is not null && definition is not null)
+            {
+                var (reval, recomputedPlan) = _policyEngine.BuildAndEvaluatePlan(version.VersionId, definition);
+                planVerified = reval.IsValid && recomputedPlan is not null &&
+                               string.Equals(recomputedPlan.PlanHash, exec.PlanHash, StringComparison.Ordinal);
+            }
+            _repository.AppendExecutionEvent(
+                exec.ExecutionId,
+                null,
+                "RecoveryPlanVerification",
+                planVerified
+                    ? "Approved version, execution plan hash, and policy scope verified consistent."
+                    : "Execution plan or policy diverged; re-validation and re-approval required before fresh execution.");
+
             var existingRecovery = _repository.GetPendingRecoveries()
                 .FirstOrDefault(r => string.Equals(r.ExecutionId, exec.ExecutionId, StringComparison.Ordinal));
 
@@ -187,7 +238,7 @@ public sealed class RecoveryService
                 var rec = _repository.CreateRecoveryRecord(
                     exec.ExecutionId,
                     RecoveryStatus.Pending,
-                    $"Isolated after abnormal termination. External state unknown={anyUnknown}. Requires explicit user recovery decision.");
+                    $"Isolated after abnormal termination. External state unknown={anyUnknown}. PlanConsistent={planVerified}. Requires explicit user recovery decision.");
                 createdRecoveries.Add(rec);
             }
             else

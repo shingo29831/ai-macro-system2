@@ -988,4 +988,71 @@ public sealed class SqliteRepository
         cmd.Parameters.AddWithValue("$reas", (object?)candidate.AmbiguityReason ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
+
+    public IReadOnlyList<RawRecordedEvent> GetRawRecordedEvents()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT EventId, ApplicationKind, EventKind, TargetRole, TargetName, TargetLabel, TargetStableId,
+                   UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp
+            FROM RecordedRawEvents
+            ORDER BY Timestamp ASC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<RawRecordedEvent>();
+        while (reader.Read())
+        {
+            list.Add(new RawRecordedEvent(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.GetInt32(11) == 1,
+                DateTimeOffset.Parse(reader.GetString(12))));
+        }
+        return list;
+    }
+
+    public IReadOnlyList<NormalizedActionCandidate> GetNormalizedCandidates()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT CandidateId, SuggestedActionType, SourceRawEventIdsJson, LocatorJson,
+                   TargetUrlOrWorkbook, SheetName, RangeAddress, SanitizedValue,
+                   IsSensitive, IsAmbiguous, AmbiguityReason
+            FROM NormalizedActionCandidates;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<NormalizedActionCandidate>();
+        while (reader.Read())
+        {
+            var rawIds = JsonSerializer.Deserialize<List<string>>(reader.GetString(2)) ?? new List<string>();
+            SemanticLocator? locator = reader.IsDBNull(3)
+                ? null
+                : JsonSerializer.Deserialize<SemanticLocator>(reader.GetString(3));
+
+            list.Add(new NormalizedActionCandidate(
+                reader.GetString(0),
+                reader.GetString(1),
+                rawIds,
+                locator,
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.GetInt32(8) == 1,
+                reader.GetInt32(9) == 1,
+                reader.IsDBNull(10) ? null : reader.GetString(10)));
+        }
+        return list;
+    }
 }

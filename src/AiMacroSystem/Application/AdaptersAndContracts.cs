@@ -242,6 +242,17 @@ public sealed class ChromeAdapter : IActionAdapter
                     return currentUrlCheck;
                 }
 
+                if (!string.IsNullOrWhiteSpace(args.DestinationUrl))
+                {
+                    if (!Uri.TryCreate(args.DestinationUrl, UriKind.Absolute, out Uri? destUri) ||
+                        !IsOriginAllowed(destUri, policy.AllowedOrigins))
+                    {
+                        return AdapterExecutionResult.Failed(
+                            FailureClassification.PolicyViolation,
+                            $"Submit destination URL '{args.DestinationUrl}' is blocked by allowlist.");
+                    }
+                }
+
                 var targetCheck = await EnsureUniqueTargetAsync(args.Locator!, policy, ct);
                 if (targetCheck is not null)
                 {

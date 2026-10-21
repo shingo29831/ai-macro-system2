@@ -129,6 +129,7 @@
         "nodeId",
         "type"
       ],
+      "additionalProperties": false,
       "properties": {
         "nodeId": {
           "type": "string",

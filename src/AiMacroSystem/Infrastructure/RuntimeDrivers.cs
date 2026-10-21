@@ -105,11 +105,7 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
     }
 
     private static string GetLocatorKey(SemanticLocator locator) =>
-        locator.StableId
-        ?? locator.Label
-        ?? $"{locator.Role}:{locator.AccessibleName}"
-        ?? locator.CssSelector
-        ?? $"{locator.CoordinateX},{locator.CoordinateY}";
+        locator.ResolveByPriority().Key;
 }
 
 public sealed class LiveExcelDriver : IExcelComDriver

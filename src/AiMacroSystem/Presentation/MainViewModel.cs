@@ -192,7 +192,20 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string EditorIrJson
     {
         get => _editorIrJson;
-        set { _editorIrJson = value; OnPropertyChanged(); }
+        set
+        {
+            if (!string.Equals(_editorIrJson, value, StringComparison.Ordinal))
+            {
+                _editorIrJson = value;
+                // 実行計画に影響する一時変更が行われた場合は既存承認を無効化する（仕様2.5 / 12）
+                if (_currentApprovalId is not null)
+                {
+                    _currentApprovalId = null;
+                    CurrentApprovalStatusText = "編集内容が変更されたため既存承認は無効化されました。再検証・再承認が必要です。";
+                }
+                OnPropertyChanged();
+            }
+        }
     }
 
     public string SelectedActionKind
