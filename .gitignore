@@ -50,3 +50,6 @@ artifacts/
 playwright-report/
 test-results/
 .playwright/
+
+# aiskel output directory
+ai_meta/
