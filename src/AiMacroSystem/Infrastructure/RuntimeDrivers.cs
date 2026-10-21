@@ -97,11 +97,7 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
         {
             return Task.FromResult(false);
         }
-        if (_activeStateSelectors.Contains(selector))
-        {
-            return Task.FromResult(true);
-        }
-        return Task.FromResult(true);
+        return Task.FromResult(_activeStateSelectors.Contains(selector));
     }
 
     private static string GetLocatorKey(SemanticLocator locator) =>

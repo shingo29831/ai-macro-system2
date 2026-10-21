@@ -47,9 +47,12 @@ public sealed class ExecutionEngine
             {
                 throw new InvalidOperationException($"Execution '{executionId}' is not currently active.");
             }
-            _pauseRequested = true;
-            _resumeSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _repository.AppendExecutionEvent(executionId, null, "PauseRequested", "User requested cooperative pause at next action boundary.");
+            if (!_pauseRequested)
+            {
+                _pauseRequested = true;
+                _resumeSignal = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _repository.AppendExecutionEvent(executionId, null, "PauseRequested", "User requested cooperative pause at next action boundary.");
+            }
         }
     }
 
@@ -336,6 +339,14 @@ public sealed class ExecutionEngine
 
             case IrConstants.NodeTypeForEach:
                 var items = ResolveArrayReference(node.CollectionRef!, runtimeOutputs);
+                if (items.Count == 0)
+                {
+                    foreach (var skippedChild in node.BodyChildren!)
+                    {
+                        MarkSubtreeSkipped(executionId, skippedChild);
+                    }
+                    break;
+                }
                 foreach (string item in items)
                 {
                     runtimeOutputs[node.NodeId] = new Dictionary<string, object?>(StringComparer.Ordinal)
@@ -355,6 +366,14 @@ public sealed class ExecutionEngine
             case IrConstants.NodeTypeWhile:
                 int iterations = 0;
                 int maxIter = node.MaxIterations ?? 100;
+                if (!EvaluateCondition(node.Condition!, runtimeOutputs))
+                {
+                    foreach (var skippedChild in node.BodyChildren!)
+                    {
+                        MarkSubtreeSkipped(executionId, skippedChild);
+                    }
+                    break;
+                }
                 while (EvaluateCondition(node.Condition!, runtimeOutputs))
                 {
                     if (++iterations > maxIter)

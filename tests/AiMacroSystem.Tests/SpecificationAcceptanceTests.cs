@@ -263,6 +263,72 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         Assert.False(result.IsValid);
         Assert.Contains(result.Issues, i => i.Code == "UNKNOWN_ACTION_TYPE");
         Assert.Contains(result.Issues, i => i.Code == "REF_SOURCE_UNREACHABLE_OR_UNDEFINED");
+
+        // ループ内部スコープの外部参照禁止と、分岐内出力の isOptional 必須検証
+        var scopeDef = CreateValidSampleDefinition();
+        scopeDef.Root!.Children!.Add(new WorkflowNode
+        {
+            NodeId = "read-excel",
+            Type = IrConstants.NodeTypeAction,
+            ActionType = IrConstants.ActionExcelReadRange,
+            Args = JsonSerializer.SerializeToElement(new ExcelReadRangeArgs
+            {
+                WorkbookPath = Path.Combine(Path.GetTempPath(), "Scope.xlsx"),
+                SheetName = "Sheet1",
+                RangeAddress = "A1:A2"
+            })
+        });
+        scopeDef.Root.Children.Add(new WorkflowNode
+        {
+            NodeId = "loop-1",
+            Type = IrConstants.NodeTypeForEach,
+            CollectionRef = new DataReference
+            {
+                SourceNodeId = "read-excel",
+                OutputName = "values",
+                ExpectedType = IrConstants.TypeArrayString
+            },
+            ItemVariableName = "item",
+            BodyChildren = new List<WorkflowNode>
+            {
+                new()
+                {
+                    NodeId = "inner-fill",
+                    Type = IrConstants.NodeTypeAction,
+                    ActionType = IrConstants.ActionChromeFill,
+                    Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
+                    {
+                        Locator = new SemanticLocator { Label = "ItemField" },
+                        ValueRef = new DataReference
+                        {
+                            SourceNodeId = "loop-1",
+                            OutputName = "item",
+                            ExpectedType = IrConstants.TypeString
+                        }
+                    })
+                }
+            }
+        });
+        scopeDef.Root.Children.Add(new WorkflowNode
+        {
+            NodeId = "outside-leak-ref",
+            Type = IrConstants.NodeTypeAction,
+            ActionType = IrConstants.ActionChromeFill,
+            Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
+            {
+                Locator = new SemanticLocator { Label = "LeakField" },
+                ValueRef = new DataReference
+                {
+                    SourceNodeId = "inner-fill",
+                    OutputName = "filledValue",
+                    ExpectedType = IrConstants.TypeString
+                }
+            })
+        });
+
+        var scopeRes = _validator.ValidateDefinition(scopeDef);
+        Assert.False(scopeRes.IsValid);
+        Assert.Contains(scopeRes.Issues, i => i.NodeId == "outside-leak-ref" && i.Code == "REF_SOURCE_UNREACHABLE_OR_UNDEFINED");
     }
 
     [Fact]

@@ -109,9 +109,29 @@ public sealed class IrValidator
         "schemaVersion", "workflowId", "name", "version", "policy", "root"
     };
 
+    private static readonly HashSet<string> _requiredPolicyProps = new(StringComparer.Ordinal)
+    {
+        "allowedOrigins", "allowCoordinateClick", "allowExternalAi"
+    };
+
     private static readonly HashSet<string> _allowedPolicyProps = new(StringComparer.Ordinal)
     {
         "allowedOrigins", "allowCoordinateClick", "allowExternalAi", "allowedExcelDirectories"
+    };
+
+    private static readonly HashSet<string> _allowedOriginProps = new(StringComparer.Ordinal)
+    {
+        "scheme", "host", "port"
+    };
+
+    private static readonly HashSet<string> _allowedDataRefProps = new(StringComparer.Ordinal)
+    {
+        "sourceNodeId", "outputName", "expectedType", "isOptional"
+    };
+
+    private static readonly HashSet<string> _allowedConditionProps = new(StringComparer.Ordinal)
+    {
+        "leftRef", "operator", "rightLiteral"
     };
 
     private static readonly HashSet<string> _allowedNodeProps = new(StringComparer.Ordinal)
@@ -305,13 +325,52 @@ public sealed class IrValidator
             }
         }
 
-        if (root.TryGetProperty("policy", out JsonElement policyElem) && policyElem.ValueKind == JsonValueKind.Object)
+        if (root.TryGetProperty("policy", out JsonElement policyElem))
         {
-            foreach (JsonProperty prop in policyElem.EnumerateObject())
+            if (policyElem.ValueKind != JsonValueKind.Object)
             {
-                if (!_allowedPolicyProps.Contains(prop.Name))
+                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_POLICY_NOT_OBJECT", "policy must be a JSON object.");
+            }
+            else
+            {
+                foreach (string req in _requiredPolicyProps)
                 {
-                    result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_POLICY_ADDITIONAL_PROPERTY", $"Unknown policy property '{prop.Name}' is not allowed by schema.");
+                    if (!policyElem.TryGetProperty(req, out _))
+                    {
+                        result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_POLICY_MISSING_PROPERTY", $"Missing required policy property '{req}'.");
+                    }
+                }
+                foreach (JsonProperty prop in policyElem.EnumerateObject())
+                {
+                    if (!_allowedPolicyProps.Contains(prop.Name))
+                    {
+                        result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_POLICY_ADDITIONAL_PROPERTY", $"Unknown policy property '{prop.Name}' is not allowed by schema.");
+                    }
+                }
+                if (policyElem.TryGetProperty("allowedOrigins", out JsonElement originsElem) && originsElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement originElem in originsElem.EnumerateArray())
+                    {
+                        if (originElem.ValueKind != JsonValueKind.Object)
+                        {
+                            result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_ORIGIN_NOT_OBJECT", "OriginRule must be a JSON object.");
+                            continue;
+                        }
+                        foreach (string req in _allowedOriginProps)
+                        {
+                            if (!originElem.TryGetProperty(req, out _))
+                            {
+                                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_ORIGIN_MISSING_PROPERTY", $"Missing required originRule property '{req}'.");
+                            }
+                        }
+                        foreach (JsonProperty prop in originElem.EnumerateObject())
+                        {
+                            if (!_allowedOriginProps.Contains(prop.Name))
+                            {
+                                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_ORIGIN_ADDITIONAL_PROPERTY", $"Unknown originRule property '{prop.Name}' is not allowed by schema.");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -330,11 +389,40 @@ public sealed class IrValidator
             return;
         }
 
+        if (!nodeElem.TryGetProperty("nodeId", out _))
+        {
+            result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_NODE_MISSING_ID", "Workflow node is missing required property 'nodeId'.");
+        }
+        if (!nodeElem.TryGetProperty("type", out _))
+        {
+            result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_NODE_MISSING_TYPE", "Workflow node is missing required property 'type'.");
+        }
+
         foreach (JsonProperty prop in nodeElem.EnumerateObject())
         {
             if (!_allowedNodeProps.Contains(prop.Name))
             {
                 result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_NODE_ADDITIONAL_PROPERTY", $"Unknown workflowNode property '{prop.Name}' is not allowed by schema.");
+            }
+        }
+
+        if (nodeElem.TryGetProperty("collectionRef", out JsonElement colRefElem) && colRefElem.ValueKind == JsonValueKind.Object)
+        {
+            ValidateDataRefSchemaElement(colRefElem, result);
+        }
+
+        if (nodeElem.TryGetProperty("condition", out JsonElement condElem) && condElem.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty prop in condElem.EnumerateObject())
+            {
+                if (!_allowedConditionProps.Contains(prop.Name))
+                {
+                    result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_CONDITION_ADDITIONAL_PROPERTY", $"Unknown conditionExpression property '{prop.Name}' is not allowed by schema.");
+                }
+            }
+            if (condElem.TryGetProperty("leftRef", out JsonElement leftRefElem) && leftRefElem.ValueKind == JsonValueKind.Object)
+            {
+                ValidateDataRefSchemaElement(leftRefElem, result);
             }
         }
 
@@ -347,6 +435,17 @@ public sealed class IrValidator
                 {
                     ValidateNodeSchemaElementRecursive(child, result);
                 }
+            }
+        }
+    }
+
+    private static void ValidateDataRefSchemaElement(JsonElement refElem, ValidationResult result)
+    {
+        foreach (JsonProperty prop in refElem.EnumerateObject())
+        {
+            if (!_allowedDataRefProps.Contains(prop.Name))
+            {
+                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_DATAREF_ADDITIONAL_PROPERTY", $"Unknown dataReference property '{prop.Name}' is not allowed by schema.");
             }
         }
     }
@@ -373,7 +472,8 @@ public sealed class IrValidator
             case IrConstants.NodeTypeSequence:
                 if (node.ActionType is not null || node.Args.HasValue || node.Condition is not null ||
                     node.ThenChildren is not null || node.ElseChildren is not null ||
-                    node.CollectionRef is not null || node.BodyChildren is not null)
+                    node.CollectionRef is not null || node.ItemVariableName is not null ||
+                    node.BodyChildren is not null || node.MaxIterations.HasValue)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "SEQUENCE_FORBIDDEN_FIELDS", "Sequence node contains fields not permitted for Sequence.", node.NodeId);
                 }
@@ -390,7 +490,8 @@ public sealed class IrValidator
 
             case IrConstants.NodeTypeIf:
                 if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
-                    node.CollectionRef is not null || node.BodyChildren is not null)
+                    node.CollectionRef is not null || node.ItemVariableName is not null ||
+                    node.BodyChildren is not null || node.MaxIterations.HasValue)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "IF_FORBIDDEN_FIELDS", "If node contains fields not permitted for If.", node.NodeId);
                 }
@@ -422,7 +523,8 @@ public sealed class IrValidator
 
             case IrConstants.NodeTypeForEach:
                 if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
-                    node.Condition is not null || node.ThenChildren is not null || node.ElseChildren is not null)
+                    node.Condition is not null || node.ThenChildren is not null || node.ElseChildren is not null ||
+                    node.MaxIterations.HasValue)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "FOREACH_FORBIDDEN_FIELDS", "ForEach node contains fields not permitted for ForEach.", node.NodeId);
                 }
@@ -467,7 +569,8 @@ public sealed class IrValidator
 
             case IrConstants.NodeTypeWhile:
                 if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
-                    node.ThenChildren is not null || node.ElseChildren is not null || node.CollectionRef is not null)
+                    node.ThenChildren is not null || node.ElseChildren is not null ||
+                    node.CollectionRef is not null || node.ItemVariableName is not null)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "WHILE_FORBIDDEN_FIELDS", "While node contains fields not permitted for While.", node.NodeId);
                 }
@@ -494,7 +597,8 @@ public sealed class IrValidator
             case IrConstants.NodeTypeAction:
                 if (node.Children is not null || node.Condition is not null ||
                     node.ThenChildren is not null || node.ElseChildren is not null ||
-                    node.CollectionRef is not null || node.BodyChildren is not null)
+                    node.CollectionRef is not null || node.ItemVariableName is not null ||
+                    node.BodyChildren is not null || node.MaxIterations.HasValue)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "ACTION_FORBIDDEN_CHILDREN", "Action node cannot contain child nodes or branch/loop definitions.", node.NodeId);
                 }
@@ -993,7 +1097,7 @@ public sealed class PolicyEngine
             return (false, "Runtime action contract or arguments are missing.");
         }
 
-        var (sideEffects, risk, targetSummary, _) = EvaluateActionRiskAndTarget(node, contract, policy);
+        var (sideEffects, risk, targetSummary, inputSummary) = EvaluateActionRiskAndTarget(node, contract, policy);
         if (risk == RiskLevel.Prohibited)
         {
             return (false, $"Runtime action '{node.NodeId}' is Prohibited by policy.");
@@ -1001,9 +1105,10 @@ public sealed class PolicyEngine
 
         if (sideEffects != plannedItem.SideEffects ||
             risk != plannedItem.EvaluatedRisk ||
-            !string.Equals(targetSummary, plannedItem.TargetSummary, StringComparison.Ordinal))
+            !string.Equals(targetSummary, plannedItem.TargetSummary, StringComparison.Ordinal) ||
+            !string.Equals(inputSummary, plannedItem.InputSummary, StringComparison.Ordinal))
         {
-            return (false, $"Runtime target, side effects, or risk level for '{node.NodeId}' diverged from approved plan.");
+            return (false, $"Runtime target, arguments, side effects, or risk level for '{node.NodeId}' diverged from approved plan.");
         }
 
         return (true, string.Empty);
@@ -1153,6 +1258,7 @@ public sealed class PolicyEngine
               .Append((int)act.SideEffects).Append(':')
               .Append((int)act.EvaluatedRisk).Append('|');
         }
+        sb.Append(JsonSerializer.Serialize(definition.Root));
 
         byte[] hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(sb.ToString()));
         return Convert.ToHexString(hashBytes);

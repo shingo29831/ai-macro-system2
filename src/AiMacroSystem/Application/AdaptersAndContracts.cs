@@ -215,10 +215,33 @@ public sealed class ChromeAdapter : IActionAdapter
                 }
 
                 string fillValue = ResolveStringArgument(args.Value, args.ValueRef, runtimeOutputs);
-                await _driver.FillElementAsync(args.Locator!, fillValue, ct);
+                try
+                {
+                    await _driver.FillElementAsync(args.Locator!, fillValue, ct);
+                }
+                catch (TimeoutException ex)
+                {
+                    return AdapterExecutionResult.Failed(
+                        FailureClassification.TransientError,
+                        $"Chrome.Fill timed out before completion: {ex.Message}",
+                        sideEffectCommitted: false);
+                }
+                catch (Exception ex)
+                {
+                    return AdapterExecutionResult.Unknown($"Chrome.Fill outcome is uncertain due to runtime error: {ex.Message}");
+                }
 
                 // 入力後の読み戻し検証（仕様9.4）
-                string? readback = await _driver.ReadElementValueAsync(args.Locator!, ct);
+                string? readback;
+                try
+                {
+                    readback = await _driver.ReadElementValueAsync(args.Locator!, ct);
+                }
+                catch (Exception ex)
+                {
+                    return AdapterExecutionResult.Unknown($"Chrome.Fill completed but readback failed: {ex.Message}");
+                }
+
                 if (!string.Equals(readback, fillValue, StringComparison.Ordinal))
                 {
                     return AdapterExecutionResult.Failed(
