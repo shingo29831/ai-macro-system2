@@ -118,6 +118,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     }
 
     public ObservableCollection<WorkflowVersionRecord> WorkflowVersions { get; } = new();
+    public ObservableCollection<WorkflowDraftRecord> WorkflowDrafts { get; } = new();
     public ObservableCollection<EasyStepItem> EasySteps { get; } = new();
     public ObservableCollection<RawRecordedEvent> RecordedEvents { get; } = new();
     public ObservableCollection<ValidationIssue> CurrentValidationIssues { get; } = new();
@@ -128,7 +129,37 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public ObservableCollection<ExecutionRecord> AllExecutions { get; } = new();
     public ObservableCollection<ExecutionEventRecord> ExecutionHistoryEvents { get; } = new();
     public ObservableCollection<RecoveryRecord> PendingRecoveries { get; } = new();
+    public ObservableCollection<RecoveryRecord> RecoveryHistory { get; } = new();
     public ObservableCollection<AiAuditRecord> AiAuditLogs { get; } = new();
+
+    private string _recoveryDecisionNotesInput = "外部状態を確認し、安全に復旧判断を行いました";
+    private string _allowedOriginHostInput = "example.com";
+    private bool _allowCoordinateClickPolicy;
+    private string _allowedExcelDirectoryInput = string.Empty;
+
+    public string RecoveryDecisionNotesInput
+    {
+        get => _recoveryDecisionNotesInput;
+        set { _recoveryDecisionNotesInput = value; OnPropertyChanged(); }
+    }
+
+    public string AllowedOriginHostInput
+    {
+        get => _allowedOriginHostInput;
+        set { _allowedOriginHostInput = value; OnPropertyChanged(); }
+    }
+
+    public bool AllowCoordinateClickPolicy
+    {
+        get => _allowCoordinateClickPolicy;
+        set { _allowCoordinateClickPolicy = value; OnPropertyChanged(); }
+    }
+
+    public string AllowedExcelDirectoryInput
+    {
+        get => _allowedExcelDirectoryInput;
+        set { _allowedExcelDirectoryInput = value; OnPropertyChanged(); }
+    }
 
     public IReadOnlyList<KeyValuePair<string, string>> AvailableActionKinds { get; } = new[]
     {
@@ -674,6 +705,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
             origins.Add(new OriginRule { Scheme = "https", Host = "example.com", Port = 443 });
         }
 
+        if (!string.IsNullOrWhiteSpace(AllowedOriginHostInput) &&
+            !origins.Any(o => string.Equals(o.Host, AllowedOriginHostInput.Trim(), StringComparison.OrdinalIgnoreCase)))
+        {
+            origins.Add(new OriginRule { Scheme = "https", Host = AllowedOriginHostInput.Trim(), Port = 443 });
+        }
+
+        var excelDirs = new List<string>();
+        if (!string.IsNullOrWhiteSpace(AllowedExcelDirectoryInput))
+        {
+            excelDirs.Add(AllowedExcelDirectoryInput.Trim());
+        }
+
         var def = new WorkflowDefinition
         {
             SchemaVersion = IrConstants.CurrentSchemaVersion,
@@ -683,8 +726,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             Policy = new PolicyDeclaration
             {
                 AllowedOrigins = origins,
-                AllowCoordinateClick = false,
-                AllowExternalAi = AllowExternalAiPolicy
+                AllowCoordinateClick = AllowCoordinateClickPolicy,
+                AllowExternalAi = AllowExternalAiPolicy,
+                AllowedExcelDirectories = excelDirs
             },
             Root = new WorkflowNode
             {
@@ -771,6 +815,51 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StatusBanner = CurrentValidationIssues.Count == 0
             ? $"✅ 安全チェックOK（{CurrentPlannedActions.Count} ステップ）"
             : $"⚠️ 要確認が {CurrentValidationIssues.Count} 件あります（「確認・結果」タブを参照）";
+    }
+
+    public void SaveCurrentAsDraft()
+    {
+        var (_, def) = new IrValidator().ValidateJson(EditorIrJson);
+        if (def is null)
+        {
+            StatusBanner = "❌ JSON構文エラーのためドラフト保存できません。";
+            return;
+        }
+
+        var existingLatest = _repository.GetLatestVersion(def.WorkflowId);
+        if (existingLatest is null)
+        {
+            var initial = _workflowService.CreateInitialWorkflow(def);
+            _currentSavedVersionId = initial.VersionId;
+        }
+
+        var latestAfter = _repository.GetLatestVersion(def.WorkflowId);
+        var draft = _workflowService.SaveDraft(def.WorkflowId, latestAfter?.VersionId, def);
+        RefreshAllListsFromDatabase();
+        StatusBanner = $"📝 ドラフト「{draft.DraftId}」を正式版とは分離して保存しました。";
+    }
+
+    public void RejectCurrentWorkflow()
+    {
+        if (_currentSavedVersionId is null)
+        {
+            SaveCurrentWorkflowAsVersion();
+        }
+        if (_currentSavedVersionId is null || _currentEvaluatedPlan is null)
+        {
+            return;
+        }
+
+        var rejected = _repository.SaveApproval(
+            _currentSavedVersionId,
+            _currentEvaluatedPlan.PlanHash,
+            string.IsNullOrWhiteSpace(ApproverNameInput) ? "ユーザー本人" : ApproverNameInput.Trim(),
+            ApprovalDecision.Rejected,
+            Array.Empty<string>());
+
+        _currentApprovalId = rejected.ApprovalId;
+        CurrentApprovalStatusText = $"🚫 却下済み（審査者: {rejected.Approver} / 時刻: {rejected.CreatedAt.ToLocalTime():HH:mm:ss}）";
+        StatusBanner = "🚫 この実行計画を却下しました。再承認されるまで実行できません。";
     }
 
     public void SaveCurrentWorkflowAsVersion()
@@ -1028,6 +1117,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
             if (outcome.IsAccepted && outcome.RawJson is not null)
             {
                 EditorIrJson = outcome.RawJson;
+                _currentSavedVersionId = null;
+                _currentApprovalId = null;
+                if (outcome.Definition is not null)
+                {
+                    WorkflowIdInput = outcome.Definition.WorkflowId;
+                    WorkflowNameInput = outcome.Definition.Name;
+                }
+                RebuildEasyStepsFromIrJson(outcome.RawJson);
                 ValidateCurrentEditorIr();
                 StatusBanner = "✨ AIが記録から安全なマクロを作成し、8段階すべての安全検証に合格しました！";
                 return;
@@ -1182,11 +1279,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
         WorkflowVersions.Clear();
         foreach (var v in _repository.GetAllLatestVersions()) WorkflowVersions.Add(v);
 
+        WorkflowDrafts.Clear();
+        foreach (var d in _repository.GetAllDrafts()) WorkflowDrafts.Add(d);
+
         AllExecutions.Clear();
         foreach (var e in _repository.GetAllExecutions()) AllExecutions.Add(e);
 
         PendingRecoveries.Clear();
         foreach (var r in _repository.GetPendingRecoveries()) PendingRecoveries.Add(r);
+
+        RecoveryHistory.Clear();
+        foreach (var rh in _repository.GetAllRecoveries()) RecoveryHistory.Add(rh);
 
         AiAuditLogs.Clear();
         foreach (var a in _repository.GetAiAuditLogs()) AiAuditLogs.Add(a);

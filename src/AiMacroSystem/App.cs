@@ -64,8 +64,8 @@ public sealed class App : System.Windows.Application
         var policyEngine = new PolicyEngine(validator);
         var approvalService = new ApprovalService();
         var workflowService = new WorkflowManagementService(repository, validator);
-        var recordingService = new RecordingService();
-        var normalizationService = new NormalizationService();
+        var recordingService = new RecordingService(repository);
+        var normalizationService = new NormalizationService(repository);
 
         var liveBrowserDriver = new LiveChromeBrowserDriver();
         var liveExcelDriver = new LiveExcelDriver();

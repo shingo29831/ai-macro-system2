@@ -382,7 +382,7 @@ public sealed class ExcelAdapter : IActionAdapter
             case IrConstants.ActionExcelReadRange:
             {
                 var args = argsElement.Deserialize<ExcelReadRangeArgs>()!;
-                var preCheck = ValidateExcelTargetState(args.WorkbookPath, args.SheetName, requireWritable: false);
+                var preCheck = ValidateExcelTargetState(args.WorkbookPath, args.SheetName, args.RangeAddress, policy, requireWritable: false);
                 if (preCheck is not null)
                 {
                     return Task.FromResult(preCheck);
@@ -429,13 +429,23 @@ public sealed class ExcelAdapter : IActionAdapter
             case IrConstants.ActionExcelWriteRange:
             {
                 var args = argsElement.Deserialize<ExcelWriteRangeArgs>()!;
-                var preCheck = ValidateExcelTargetState(args.WorkbookPath, args.SheetName, requireWritable: true);
+                var preCheck = ValidateExcelTargetState(args.WorkbookPath, args.SheetName, args.RangeAddress, policy, requireWritable: true);
                 if (preCheck is not null)
                 {
                     return Task.FromResult(preCheck);
                 }
 
                 string[,] expectedMatrix = ResolveWriteMatrix(args, runtimeOutputs);
+                if (IrValidator.TryGetRangeDimensions(args.RangeAddress, out int rangeRows, out int rangeCols))
+                {
+                    if (expectedMatrix.GetLength(0) != rangeRows || expectedMatrix.GetLength(1) != rangeCols)
+                    {
+                        return Task.FromResult(AdapterExecutionResult.Failed(
+                            FailureClassification.ValidationFailure,
+                            $"Excel write matrix dimensions ({expectedMatrix.GetLength(0)}x{expectedMatrix.GetLength(1)}) do not match target range '{args.RangeAddress}' ({rangeRows}x{rangeCols}).",
+                            sideEffectCommitted: false));
+                    }
+                }
 
                 try
                 {
@@ -501,9 +511,30 @@ public sealed class ExcelAdapter : IActionAdapter
         return Task.FromResult(ExternalStateProbeResult.OutcomeUnknown);
     }
 
-    private AdapterExecutionResult? ValidateExcelTargetState(string workbookPath, string sheetName, bool requireWritable)
+    private AdapterExecutionResult? ValidateExcelTargetState(
+        string workbookPath,
+        string sheetName,
+        string rangeAddress,
+        PolicyDeclaration policy,
+        bool requireWritable)
     {
-        if (string.IsNullOrWhiteSpace(workbookPath) || !_driver.WorkbookExistsAndAccessible(workbookPath, out bool multipleWindows, out bool isReadOnly))
+        if (string.IsNullOrWhiteSpace(workbookPath) || workbookPath.Equals("ActiveWorkbook", StringComparison.OrdinalIgnoreCase))
+        {
+            return AdapterExecutionResult.Failed(FailureClassification.ValidationFailure, "Explicit workbookPath is required; ActiveWorkbook is prohibited.");
+        }
+        if (string.IsNullOrWhiteSpace(sheetName) || sheetName.Equals("ActiveSheet", StringComparison.OrdinalIgnoreCase))
+        {
+            return AdapterExecutionResult.Failed(FailureClassification.ValidationFailure, "Explicit sheetName is required; ActiveSheet is prohibited.");
+        }
+        if (!IrValidator.TryGetRangeDimensions(rangeAddress, out _, out _))
+        {
+            return AdapterExecutionResult.Failed(FailureClassification.ValidationFailure, $"Invalid A1-style Excel rangeAddress '{rangeAddress}'.");
+        }
+        if (!PolicyEngine.IsPathAllowed(workbookPath, policy.AllowedExcelDirectories))
+        {
+            return AdapterExecutionResult.Failed(FailureClassification.PolicyViolation, $"Excel workbook path '{workbookPath}' is outside allowedExcelDirectories.");
+        }
+        if (!_driver.WorkbookExistsAndAccessible(workbookPath, out bool multipleWindows, out bool isReadOnly))
         {
             return AdapterExecutionResult.Failed(FailureClassification.TargetNotFound, $"Excel workbook '{workbookPath}' cannot be uniquely identified or accessed.");
         }

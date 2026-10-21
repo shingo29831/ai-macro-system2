@@ -22,6 +22,7 @@ public sealed class PlannedActionItem
     public required string NodeId { get; init; }
     public required string ActionType { get; init; }
     public required string TargetSummary { get; init; }
+    public string InputSummary { get; init; } = string.Empty;
     public required SideEffectKind SideEffects { get; init; }
     public required RiskLevel EvaluatedRisk { get; init; }
     public required bool RequiresIndividualApproval { get; init; }

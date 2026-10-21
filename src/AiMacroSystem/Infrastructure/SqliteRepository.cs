@@ -127,6 +127,42 @@ public sealed class SqliteRepository
                 ExternalSendApproved INTEGER NOT NULL,
                 Timestamp TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS RecordedRawEvents (
+                EventId TEXT PRIMARY KEY,
+                ApplicationKind TEXT NOT NULL,
+                EventKind TEXT NOT NULL,
+                TargetRole TEXT NULL,
+                TargetName TEXT NULL,
+                TargetLabel TEXT NULL,
+                TargetStableId TEXT NULL,
+                UrlOrWorkbookPath TEXT NULL,
+                SheetName TEXT NULL,
+                RangeAddress TEXT NULL,
+                CapturedValue TEXT NULL,
+                IsSensitive INTEGER NOT NULL,
+                Timestamp TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS NormalizedActionCandidates (
+                CandidateId TEXT PRIMARY KEY,
+                SuggestedActionType TEXT NOT NULL,
+                SourceRawEventIdsJson TEXT NOT NULL,
+                LocatorJson TEXT NULL,
+                TargetUrlOrWorkbook TEXT NULL,
+                SheetName TEXT NULL,
+                RangeAddress TEXT NULL,
+                SanitizedValue TEXT NULL,
+                IsSensitive INTEGER NOT NULL,
+                IsAmbiguous INTEGER NOT NULL,
+                AmbiguityReason TEXT NULL
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_WorkflowVersions_Immutable
+            BEFORE UPDATE ON WorkflowVersions
+            BEGIN
+                SELECT RAISE(ABORT, 'Formal WorkflowVersions are immutable.');
+            END;
             """;
         cmd.ExecuteNonQuery();
     }
@@ -204,6 +240,25 @@ public sealed class SqliteRepository
 
         tx.Commit();
         return new WorkflowDraftRecord(draftId, workflowId, baseVersionId, draftJson, now);
+    }
+
+    public IReadOnlyList<WorkflowDraftRecord> GetAllDrafts()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT DraftId, WorkflowId, BaseVersionId, DraftJson, UpdatedAt FROM WorkflowDrafts ORDER BY UpdatedAt DESC;";
+        using var reader = cmd.ExecuteReader();
+        var list = new List<WorkflowDraftRecord>();
+        while (reader.Read())
+        {
+            list.Add(new WorkflowDraftRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetString(3),
+                DateTimeOffset.Parse(reader.GetString(4))));
+        }
+        return list;
     }
 
     public WorkflowDraftRecord? GetDraftById(string draftId)
@@ -784,6 +839,30 @@ public sealed class SqliteRepository
         return new RecoveryRecord(recoveryId, executionId, resolution, decisionNotes, createdAt, now);
     }
 
+    public IReadOnlyList<RecoveryRecord> GetAllRecoveries()
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT RecoveryId, ExecutionId, RecoveryStatus, Decision, CreatedAt, ResolvedAt
+            FROM RecoveryRecords
+            ORDER BY CreatedAt DESC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<RecoveryRecord>();
+        while (reader.Read())
+        {
+            list.Add(new RecoveryRecord(
+                reader.GetString(0),
+                reader.GetString(1),
+                Enum.Parse<RecoveryStatus>(reader.GetString(2)),
+                reader.GetString(3),
+                DateTimeOffset.Parse(reader.GetString(4)),
+                reader.IsDBNull(5) ? null : DateTimeOffset.Parse(reader.GetString(5))));
+        }
+        return list;
+    }
+
     public IReadOnlyList<RecoveryRecord> GetPendingRecoveries()
     {
         using var conn = OpenConnection();
@@ -853,5 +932,60 @@ public sealed class SqliteRepository
                 DateTimeOffset.Parse(reader.GetString(8))));
         }
         return list;
+    }
+
+    public void InsertRawRecordedEvent(RawRecordedEvent ev)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO RecordedRawEvents (
+                EventId, ApplicationKind, EventKind, TargetRole, TargetName, TargetLabel, TargetStableId,
+                UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp
+            ) VALUES (
+                $id, $app, $kind, $role, $name, $label, $sid, $url, $sheet, $range, $val, $sens, $ts
+            );
+            """;
+        cmd.Parameters.AddWithValue("$id", ev.EventId);
+        cmd.Parameters.AddWithValue("$app", ev.ApplicationKind);
+        cmd.Parameters.AddWithValue("$kind", ev.EventKind);
+        cmd.Parameters.AddWithValue("$role", (object?)ev.TargetRole ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$name", (object?)ev.TargetName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$label", (object?)ev.TargetLabel ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sid", (object?)ev.TargetStableId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$url", (object?)SensitiveDataProtector.SanitizeText(ev.UrlOrWorkbookPath) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sheet", (object?)ev.SheetName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$range", (object?)ev.RangeAddress ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$val", (object?)(ev.IsSensitive ? SensitiveDataProtector.RedactedPlaceholder : SensitiveDataProtector.SanitizeText(ev.CapturedValue)) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sens", ev.IsSensitive ? 1 : 0);
+        cmd.Parameters.AddWithValue("$ts", ev.Timestamp.ToString("O"));
+        cmd.ExecuteNonQuery();
+    }
+
+    public void InsertNormalizedCandidate(NormalizedActionCandidate candidate)
+    {
+        using var conn = OpenConnection();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO NormalizedActionCandidates (
+                CandidateId, SuggestedActionType, SourceRawEventIdsJson, LocatorJson,
+                TargetUrlOrWorkbook, SheetName, RangeAddress, SanitizedValue,
+                IsSensitive, IsAmbiguous, AmbiguityReason
+            ) VALUES (
+                $id, $act, $rawIds, $loc, $target, $sheet, $range, $val, $sens, $amb, $reas
+            );
+            """;
+        cmd.Parameters.AddWithValue("$id", candidate.CandidateId);
+        cmd.Parameters.AddWithValue("$act", candidate.SuggestedActionType);
+        cmd.Parameters.AddWithValue("$rawIds", JsonSerializer.Serialize(candidate.SourceRawEventIds));
+        cmd.Parameters.AddWithValue("$loc", candidate.Locator is not null ? JsonSerializer.Serialize(candidate.Locator) : DBNull.Value);
+        cmd.Parameters.AddWithValue("$target", (object?)SensitiveDataProtector.SanitizeText(candidate.TargetUrlOrWorkbook) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sheet", (object?)candidate.SheetName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$range", (object?)candidate.RangeAddress ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$val", (object?)(candidate.IsSensitive ? SensitiveDataProtector.RedactedPlaceholder : SensitiveDataProtector.SanitizeText(candidate.SanitizedValue)) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$sens", candidate.IsSensitive ? 1 : 0);
+        cmd.Parameters.AddWithValue("$amb", candidate.IsAmbiguous ? 1 : 0);
+        cmd.Parameters.AddWithValue("$reas", (object?)candidate.AmbiguityReason ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
     }
 }

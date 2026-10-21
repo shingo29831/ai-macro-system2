@@ -78,8 +78,14 @@ public sealed record NormalizedActionCandidate(
 
 public sealed class RecordingService
 {
+    private readonly SqliteRepository? _repository;
     private readonly List<RawRecordedEvent> _events = new();
     public bool IsRecording { get; private set; }
+
+    public RecordingService(SqliteRepository? repository = null)
+    {
+        _repository = repository;
+    }
 
     public void StartRecording()
     {
@@ -131,6 +137,7 @@ public sealed class RecordingService
         if (IsRecording)
         {
             _events.Add(ev);
+            _repository?.InsertRawRecordedEvent(ev);
         }
         return ev;
     }
@@ -140,6 +147,13 @@ public sealed class RecordingService
 
 public sealed class NormalizationService
 {
+    private readonly SqliteRepository? _repository;
+
+    public NormalizationService(SqliteRepository? repository = null)
+    {
+        _repository = repository;
+    }
+
     public IReadOnlyList<NormalizedActionCandidate> Normalize(IReadOnlyList<RawRecordedEvent> rawEvents)
     {
         var candidates = new List<NormalizedActionCandidate>();
@@ -204,7 +218,7 @@ public sealed class NormalizationService
                 }
             }
 
-            candidates.Add(new NormalizedActionCandidate(
+            var candidate = new NormalizedActionCandidate(
                 CandidateId: $"cand-{Guid.NewGuid():N}",
                 SuggestedActionType: actionType,
                 SourceRawEventIds: new[] { ev.EventId },
@@ -215,7 +229,10 @@ public sealed class NormalizationService
                 SanitizedValue: ev.CapturedValue,
                 IsSensitive: ev.IsSensitive,
                 IsAmbiguous: isAmbiguous,
-                AmbiguityReason: ambiguityReason));
+                AmbiguityReason: ambiguityReason);
+
+            candidates.Add(candidate);
+            _repository?.InsertNormalizedCandidate(candidate);
         }
 
         return candidates;

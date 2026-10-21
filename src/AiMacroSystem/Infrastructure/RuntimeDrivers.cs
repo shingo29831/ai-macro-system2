@@ -431,7 +431,9 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                 }
                 case IrConstants.ActionExcelWriteRange:
                 {
+                    string rangeAddr = cand.RangeAddress ?? "A1:A1";
                     string valText = cand.SanitizedValue ?? "自動記録データ";
+                    var parsedRows = ParseMatrixForRange(valText, rangeAddr);
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -442,8 +444,8 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         {
                             WorkbookPath = cand.TargetUrlOrWorkbook ?? Path.Combine(Path.GetTempPath(), "MacroSample.xlsx"),
                             SheetName = cand.SheetName ?? "Sheet1",
-                            RangeAddress = cand.RangeAddress ?? "A1:A1",
-                            Values = new List<List<string>> { new() { valText } }
+                            RangeAddress = rangeAddr,
+                            Values = parsedRows
                         })
                     });
                     break;
@@ -486,5 +488,33 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
 
         string json = JsonSerializer.Serialize(wf, new JsonSerializerOptions { WriteIndented = true });
         return Task.FromResult(json);
+    }
+
+    private static List<List<string>> ParseMatrixForRange(string text, string rangeAddress)
+    {
+        var rawLines = (text ?? string.Empty)
+            .Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => l.Split(',').Select(c => c.Trim()).ToList())
+            .ToList();
+
+        if (!IrValidator.TryGetRangeDimensions(rangeAddress, out int targetRows, out int targetCols))
+        {
+            return rawLines.Count > 0 ? rawLines : new List<List<string>> { new() { text ?? string.Empty } };
+        }
+
+        var matrix = new List<List<string>>(targetRows);
+        for (int r = 0; r < targetRows; r++)
+        {
+            var row = new List<string>(targetCols);
+            for (int c = 0; c < targetCols; c++)
+            {
+                string cell = (r < rawLines.Count && c < rawLines[r].Count)
+                    ? rawLines[r][c]
+                    : (rawLines.Count > 0 && rawLines[0].Count > 0 ? rawLines[0][0] : "データ");
+                row.Add(cell);
+            }
+            matrix.Add(row);
+        }
+        return matrix;
     }
 }

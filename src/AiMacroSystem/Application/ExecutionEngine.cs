@@ -300,14 +300,14 @@ public sealed class ExecutionEngine
             return;
         }
 
-        // 実行時にも承認済み計画と対象・アクション種別に重要な差異がないか再検証する（仕様2.5 / 8.3）
-        var plannedItem = approvedPlan.PlannedActions.FirstOrDefault(p => string.Equals(p.NodeId, node.NodeId, StringComparison.Ordinal));
-        if (plannedItem is null || !string.Equals(plannedItem.ActionType, node.ActionType, StringComparison.Ordinal))
+        // 実行直前に対象・引数・許可範囲・副作用リスクが承認済み計画と一致するか再検証する（仕様2.6 / 8）
+        var (runtimePlanOk, runtimeMismatchReason) = _policyEngine.VerifyRuntimeNodeMatchesApprovedPlan(node, policy, approvedPlan);
+        if (!runtimePlanOk)
         {
             ActionStateMachine.EnsureValidTransition(ActionExecutionStatus.Pending, ActionExecutionStatus.Running);
             _repository.UpdateActionStateAtomic(executionId, actionExecutionId, ActionExecutionStatus.Running, 1, FailureClassification.None, "Starting runtime verification.", "ActionStarted");
             ActionStateMachine.EnsureValidTransition(ActionExecutionStatus.Running, ActionExecutionStatus.Failed);
-            _repository.UpdateActionStateAtomic(executionId, actionExecutionId, ActionExecutionStatus.Failed, 1, FailureClassification.PolicyViolation, "Runtime action differs from approved execution plan.", "ActionFailedPlanMismatch");
+            _repository.UpdateActionStateAtomic(executionId, actionExecutionId, ActionExecutionStatus.Failed, 1, FailureClassification.PolicyViolation, runtimeMismatchReason, "ActionFailedPlanMismatch");
             flags.HasFailed = true;
             return;
         }
@@ -385,6 +385,16 @@ public sealed class ExecutionEngine
         {
             await ActionNodeCompletedAsync.Invoke(executionId, node.NodeId);
         }
+
+        // 停止要求受付後、実行中アクションが完了したことを独立イベントとして記録する（仕様11）
+        if (_pauseRequested || _cancelRequested || ct.IsCancellationRequested)
+        {
+            _repository.AppendExecutionEvent(
+                executionId,
+                actionExecutionId,
+                "RunningActionCompletedAfterStopRequest",
+                $"Running action '{node.NodeId}' completed safely before applying cooperative stop.");
+        }
     }
 
     private async Task HandleActionBoundaryPauseOrCancelAsync(string executionId, ExecutionOutcomeFlags flags, CancellationToken ct)
@@ -392,6 +402,7 @@ public sealed class ExecutionEngine
         if (_cancelRequested || ct.IsCancellationRequested)
         {
             flags.WasCancelled = true;
+            _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed at action boundary.");
             return;
         }
 
@@ -407,10 +418,12 @@ public sealed class ExecutionEngine
         if (waitTcs is not null)
         {
             TransitionExecution(executionId, ExecutionStatus.Running, ExecutionStatus.Paused, "Execution paused at action boundary.");
+            _repository.AppendExecutionEvent(executionId, null, "PauseConfirmed", "Cooperative pause confirmed at action boundary.");
             bool resumed = await waitTcs.Task;
             if (!resumed || _cancelRequested || ct.IsCancellationRequested)
             {
                 flags.WasCancelled = true;
+                _repository.AppendExecutionEvent(executionId, null, "CancelConfirmed", "Cooperative cancellation confirmed while paused.");
                 return;
             }
             TransitionExecution(executionId, ExecutionStatus.Paused, ExecutionStatus.Running, "Execution resumed from Paused state.");

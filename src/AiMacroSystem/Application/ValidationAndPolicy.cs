@@ -102,6 +102,75 @@ public static class ActionCatalog
 public sealed class IrValidator
 {
     private static readonly Regex _excelRangeRegex = new(@"^[A-Z]+[1-9][0-9]*(:[A-Z]+[1-9][0-9]*)?$", RegexOptions.Compiled);
+    private static readonly Regex _singleCellRegex = new(@"^([A-Z]+)([1-9][0-9]*)$", RegexOptions.Compiled);
+
+    private static readonly HashSet<string> _allowedRootProps = new(StringComparer.Ordinal)
+    {
+        "schemaVersion", "workflowId", "name", "version", "policy", "root"
+    };
+
+    private static readonly HashSet<string> _allowedPolicyProps = new(StringComparer.Ordinal)
+    {
+        "allowedOrigins", "allowCoordinateClick", "allowExternalAi", "allowedExcelDirectories"
+    };
+
+    private static readonly HashSet<string> _allowedNodeProps = new(StringComparer.Ordinal)
+    {
+        "nodeId", "type", "actionType", "args", "children", "condition",
+        "thenChildren", "elseChildren", "collectionRef", "itemVariableName",
+        "bodyChildren", "maxIterations", "declaredOutputs", "sourceCandidateIds"
+    };
+
+    private static readonly HashSet<string> _allowedConditionOperators = new(StringComparer.Ordinal)
+    {
+        "Equals", "NotEquals", "NotEmpty"
+    };
+
+    public static bool TryGetRangeDimensions(string rangeAddress, out int rows, out int cols)
+    {
+        rows = 0;
+        cols = 0;
+        if (string.IsNullOrWhiteSpace(rangeAddress) || !_excelRangeRegex.IsMatch(rangeAddress))
+        {
+            return false;
+        }
+
+        string[] parts = rangeAddress.Split(':');
+        if (!TryParseCellCoord(parts[0], out int r1, out int c1))
+        {
+            return false;
+        }
+        if (parts.Length == 1)
+        {
+            rows = 1;
+            cols = 1;
+            return true;
+        }
+        if (!TryParseCellCoord(parts[1], out int r2, out int c2))
+        {
+            return false;
+        }
+        rows = Math.Abs(r2 - r1) + 1;
+        cols = Math.Abs(c2 - c1) + 1;
+        return true;
+    }
+
+    private static bool TryParseCellCoord(string cell, out int row, out int col)
+    {
+        row = 0;
+        col = 0;
+        var m = _singleCellRegex.Match(cell.Trim().ToUpperInvariant());
+        if (!m.Success)
+        {
+            return false;
+        }
+        row = int.Parse(m.Groups[2].Value);
+        foreach (char ch in m.Groups[1].Value)
+        {
+            col = (col * 26) + (ch - 'A' + 1);
+        }
+        return true;
+    }
 
     public (ValidationResult Result, WorkflowDefinition? Definition) ValidateJson(string rawJson)
     {
@@ -194,12 +263,64 @@ public sealed class IrValidator
             return;
         }
 
-        string[] requiredProps = { "schemaVersion", "workflowId", "name", "version", "policy", "root" };
-        foreach (string req in requiredProps)
+        foreach (string req in _allowedRootProps)
         {
             if (!root.TryGetProperty(req, out _))
             {
                 result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_MISSING_PROPERTY", $"Missing required property '{req}'.");
+            }
+        }
+
+        foreach (JsonProperty prop in root.EnumerateObject())
+        {
+            if (!_allowedRootProps.Contains(prop.Name))
+            {
+                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_ADDITIONAL_PROPERTY", $"Unknown root property '{prop.Name}' is not allowed by schema.");
+            }
+        }
+
+        if (root.TryGetProperty("policy", out JsonElement policyElem) && policyElem.ValueKind == JsonValueKind.Object)
+        {
+            foreach (JsonProperty prop in policyElem.EnumerateObject())
+            {
+                if (!_allowedPolicyProps.Contains(prop.Name))
+                {
+                    result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_POLICY_ADDITIONAL_PROPERTY", $"Unknown policy property '{prop.Name}' is not allowed by schema.");
+                }
+            }
+        }
+
+        if (root.TryGetProperty("root", out JsonElement rootNodeElem))
+        {
+            ValidateNodeSchemaElementRecursive(rootNodeElem, result);
+        }
+    }
+
+    private static void ValidateNodeSchemaElementRecursive(JsonElement nodeElem, ValidationResult result)
+    {
+        if (nodeElem.ValueKind != JsonValueKind.Object)
+        {
+            result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_NODE_NOT_OBJECT", "Workflow node must be a JSON object.");
+            return;
+        }
+
+        foreach (JsonProperty prop in nodeElem.EnumerateObject())
+        {
+            if (!_allowedNodeProps.Contains(prop.Name))
+            {
+                result.AddIssue(ValidationStage.JsonSchema, "SCHEMA_NODE_ADDITIONAL_PROPERTY", $"Unknown workflowNode property '{prop.Name}' is not allowed by schema.");
+            }
+        }
+
+        string[] childArrayNames = { "children", "thenChildren", "elseChildren", "bodyChildren" };
+        foreach (string arrName in childArrayNames)
+        {
+            if (nodeElem.TryGetProperty(arrName, out JsonElement arrElem) && arrElem.ValueKind == JsonValueKind.Array)
+            {
+                foreach (JsonElement child in arrElem.EnumerateArray())
+                {
+                    ValidateNodeSchemaElementRecursive(child, result);
+                }
             }
         }
     }
@@ -224,6 +345,12 @@ public sealed class IrValidator
         switch (node.Type)
         {
             case IrConstants.NodeTypeSequence:
+                if (node.ActionType is not null || node.Args.HasValue || node.Condition is not null ||
+                    node.ThenChildren is not null || node.ElseChildren is not null ||
+                    node.CollectionRef is not null || node.BodyChildren is not null)
+                {
+                    result.AddIssue(ValidationStage.ControlFlowStructure, "SEQUENCE_FORBIDDEN_FIELDS", "Sequence node contains fields not permitted for Sequence.", node.NodeId);
+                }
                 if (node.Children is null || node.Children.Count == 0)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "SEQUENCE_EMPTY", "Sequence node must contain at least one child node.", node.NodeId);
@@ -236,14 +363,12 @@ public sealed class IrValidator
                 break;
 
             case IrConstants.NodeTypeIf:
-                if (node.Condition?.LeftRef is null)
+                if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
+                    node.CollectionRef is not null || node.BodyChildren is not null)
                 {
-                    result.AddIssue(ValidationStage.ControlFlowStructure, "IF_CONDITION_MISSING", "If node requires a valid condition.leftRef.", node.NodeId);
+                    result.AddIssue(ValidationStage.ControlFlowStructure, "IF_FORBIDDEN_FIELDS", "If node contains fields not permitted for If.", node.NodeId);
                 }
-                else
-                {
-                    ValidateDataReference(node.Condition.LeftRef, visibleOutputs, node.NodeId, result);
-                }
+                ValidateConditionExpression(node.Condition, visibleOutputs, node.NodeId, "IF", result);
 
                 if (node.ThenChildren is null || node.ThenChildren.Count == 0)
                 {
@@ -270,6 +395,11 @@ public sealed class IrValidator
                 break;
 
             case IrConstants.NodeTypeForEach:
+                if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
+                    node.Condition is not null || node.ThenChildren is not null || node.ElseChildren is not null)
+                {
+                    result.AddIssue(ValidationStage.ControlFlowStructure, "FOREACH_FORBIDDEN_FIELDS", "ForEach node contains fields not permitted for ForEach.", node.NodeId);
+                }
                 if (node.CollectionRef is null)
                 {
                     result.AddIssue(ValidationStage.ControlFlowStructure, "FOREACH_COLLECTION_MISSING", "ForEach node requires collectionRef.", node.NodeId);
@@ -310,14 +440,12 @@ public sealed class IrValidator
                 break;
 
             case IrConstants.NodeTypeWhile:
-                if (node.Condition?.LeftRef is null)
+                if (node.ActionType is not null || node.Args.HasValue || node.Children is not null ||
+                    node.ThenChildren is not null || node.ElseChildren is not null || node.CollectionRef is not null)
                 {
-                    result.AddIssue(ValidationStage.ControlFlowStructure, "WHILE_CONDITION_MISSING", "While node requires condition.leftRef.", node.NodeId);
+                    result.AddIssue(ValidationStage.ControlFlowStructure, "WHILE_FORBIDDEN_FIELDS", "While node contains fields not permitted for While.", node.NodeId);
                 }
-                else
-                {
-                    ValidateDataReference(node.Condition.LeftRef, visibleOutputs, node.NodeId, result);
-                }
+                ValidateConditionExpression(node.Condition, visibleOutputs, node.NodeId, "WHILE", result);
 
                 if (!node.MaxIterations.HasValue || node.MaxIterations.Value <= 0 || node.MaxIterations.Value > 10000)
                 {
@@ -338,6 +466,12 @@ public sealed class IrValidator
                 break;
 
             case IrConstants.NodeTypeAction:
+                if (node.Children is not null || node.Condition is not null ||
+                    node.ThenChildren is not null || node.ElseChildren is not null ||
+                    node.CollectionRef is not null || node.BodyChildren is not null)
+                {
+                    result.AddIssue(ValidationStage.ControlFlowStructure, "ACTION_FORBIDDEN_CHILDREN", "Action node cannot contain child nodes or branch/loop definitions.", node.NodeId);
+                }
                 ValidateActionNode(node, policy, visibleOutputs, result);
                 break;
 
@@ -449,6 +583,20 @@ public sealed class IrValidator
                 {
                     result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "EXCEL_WRITE_VALUES_MISSING", "Excel.WriteRange requires non-empty values or valuesRef.", node.NodeId);
                 }
+                if (hasStaticValues && !string.IsNullOrWhiteSpace(args?.RangeAddress) &&
+                    TryGetRangeDimensions(args.RangeAddress, out int expectedRows, out int expectedCols))
+                {
+                    int actualRows = args.Values!.Count;
+                    int actualCols = args.Values.Max(r => r.Count);
+                    if (actualRows != expectedRows || actualCols != expectedCols)
+                    {
+                        result.AddIssue(
+                            ValidationStage.ArgumentTypesAndRanges,
+                            "EXCEL_WRITE_SIZE_MISMATCH",
+                            $"Excel.WriteRange values size ({actualRows}x{actualCols}) does not match rangeAddress '{args.RangeAddress}' ({expectedRows}x{expectedCols}).",
+                            node.NodeId);
+                    }
+                }
                 if (args?.ValuesRef is not null)
                 {
                     ValidateDataReference(args.ValuesRef, visibleOutputs, node.NodeId, result);
@@ -479,11 +627,46 @@ public sealed class IrValidator
         visibleOutputs[node.NodeId] = outputsForNode;
     }
 
+    private static void ValidateConditionExpression(
+        ConditionExpression? condition,
+        Dictionary<string, Dictionary<string, (string Type, bool IsConditional)>> visibleOutputs,
+        string nodeId,
+        string prefix,
+        ValidationResult result)
+    {
+        if (condition?.LeftRef is null)
+        {
+            result.AddIssue(ValidationStage.ControlFlowStructure, $"{prefix}_CONDITION_MISSING", $"{prefix} node requires condition.leftRef.", nodeId);
+            return;
+        }
+
+        ValidateDataReference(condition.LeftRef, visibleOutputs, nodeId, result);
+
+        if (string.IsNullOrWhiteSpace(condition.Operator) || !_allowedConditionOperators.Contains(condition.Operator))
+        {
+            result.AddIssue(ValidationStage.ControlFlowStructure, $"{prefix}_OPERATOR_INVALID", $"Unsupported condition operator '{condition.Operator}'.", nodeId);
+        }
+        else if ((condition.Operator == "Equals" || condition.Operator == "NotEquals") && condition.RightLiteral is null)
+        {
+            result.AddIssue(ValidationStage.ControlFlowStructure, $"{prefix}_RIGHT_LITERAL_MISSING", $"Condition operator '{condition.Operator}' requires rightLiteral.", nodeId);
+        }
+    }
+
     private static void ValidateLocator(SemanticLocator? locator, PolicyDeclaration policy, string nodeId, ValidationResult result)
     {
         if (locator is null)
         {
             result.AddIssue(ValidationStage.TargetAndAllowedScope, "LOCATOR_MISSING", "Chrome action requires a target locator.", nodeId);
+            return;
+        }
+        if (locator.CoordinateX.HasValue != locator.CoordinateY.HasValue)
+        {
+            result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "LOCATOR_COORDINATE_INCOMPLETE", "CoordinateX and CoordinateY must both be specified together.", nodeId);
+            return;
+        }
+        if (locator.CoordinateX.HasValue && (locator.CoordinateX.Value < 0 || locator.CoordinateY!.Value < 0))
+        {
+            result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "LOCATOR_COORDINATE_OUT_OF_RANGE", "Coordinates must be non-negative integers.", nodeId);
             return;
         }
         if (locator.UsesCoordinatesOnly())
@@ -681,7 +864,7 @@ public sealed class PolicyEngine
                 break;
             case IrConstants.NodeTypeAction:
                 var contract = ActionCatalog.All[node.ActionType!];
-                var (sideEffects, risk, targetSummary) = EvaluateActionRiskAndTarget(node, contract, policy);
+                var (sideEffects, risk, targetSummary, inputSummary) = EvaluateActionRiskAndTarget(node, contract, policy);
                 if (risk == RiskLevel.Prohibited)
                 {
                     validation.AddIssue(
@@ -696,6 +879,7 @@ public sealed class PolicyEngine
                     NodeId = node.NodeId,
                     ActionType = node.ActionType!,
                     TargetSummary = targetSummary,
+                    InputSummary = inputSummary,
                     SideEffects = sideEffects,
                     EvaluatedRisk = risk,
                     RequiresIndividualApproval = risk >= RiskLevel.High
@@ -704,7 +888,40 @@ public sealed class PolicyEngine
         }
     }
 
-    private static (SideEffectKind SideEffects, RiskLevel Risk, string TargetSummary) EvaluateActionRiskAndTarget(
+    public (bool IsValid, string FailureReason) VerifyRuntimeNodeMatchesApprovedPlan(
+        WorkflowNode node,
+        PolicyDeclaration policy,
+        ExecutionPlan approvedPlan)
+    {
+        var plannedItem = approvedPlan.PlannedActions.FirstOrDefault(p => string.Equals(p.NodeId, node.NodeId, StringComparison.Ordinal));
+        if (plannedItem is null || string.IsNullOrWhiteSpace(node.ActionType) ||
+            !string.Equals(plannedItem.ActionType, node.ActionType, StringComparison.Ordinal))
+        {
+            return (false, "Runtime action node or actionType does not match the approved execution plan.");
+        }
+
+        if (!ActionCatalog.TryGetContract(node.ActionType, out var contract) || !node.Args.HasValue)
+        {
+            return (false, "Runtime action contract or arguments are missing.");
+        }
+
+        var (sideEffects, risk, targetSummary, _) = EvaluateActionRiskAndTarget(node, contract, policy);
+        if (risk == RiskLevel.Prohibited)
+        {
+            return (false, $"Runtime action '{node.NodeId}' is Prohibited by policy.");
+        }
+
+        if (sideEffects != plannedItem.SideEffects ||
+            risk != plannedItem.EvaluatedRisk ||
+            !string.Equals(targetSummary, plannedItem.TargetSummary, StringComparison.Ordinal))
+        {
+            return (false, $"Runtime target, side effects, or risk level for '{node.NodeId}' diverged from approved plan.");
+        }
+
+        return (true, string.Empty);
+    }
+
+    private static (SideEffectKind SideEffects, RiskLevel Risk, string TargetSummary, string InputSummary) EvaluateActionRiskAndTarget(
         WorkflowNode node,
         ActionContract contract,
         PolicyDeclaration policy)
@@ -712,6 +929,7 @@ public sealed class PolicyEngine
         SideEffectKind sideEffects = contract.DeclaredSideEffects;
         RiskLevel risk = contract.BaseRiskLevel;
         string targetSummary = node.ActionType!;
+        string inputSummary = "-";
 
         JsonElement argsElement = node.Args!.Value;
 
@@ -721,6 +939,7 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ChromeNavigateArgs>()!;
                 targetSummary = args.Url;
+                inputSummary = args.Url;
                 if (Uri.TryCreate(args.Url, UriKind.Absolute, out Uri? uri) && uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase))
                 {
                     // 非暗号化HTTP通信はリスクをMediumに引き上げる
@@ -732,6 +951,7 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ChromeClickArgs>()!;
                 targetSummary = args.Locator?.AccessibleName ?? args.Locator?.Label ?? args.Locator?.StableId ?? args.Locator?.CssSelector ?? "Coordinates";
+                inputSummary = args.IsDestructive ? "Destructive Click" : "Click";
                 if (args.IsDestructive)
                 {
                     sideEffects |= SideEffectKind.Destructive;
@@ -747,6 +967,9 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ChromeFillArgs>()!;
                 targetSummary = args.Locator?.Label ?? args.Locator?.AccessibleName ?? args.Locator?.StableId ?? "Input";
+                inputSummary = args.IsSensitive
+                    ? SensitiveDataProtector.RedactedPlaceholder
+                    : (args.ValueRef is not null ? $"Ref:{args.ValueRef.SourceNodeId}.{args.ValueRef.OutputName}" : (args.Value ?? string.Empty));
                 if (args.IsSensitive)
                 {
                     risk = RiskLevel.High;
@@ -757,6 +980,7 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ChromeSubmitArgs>()!;
                 targetSummary = args.DestinationUrl;
+                inputSummary = $"Submit -> {args.ExpectedSuccessSelector}";
                 risk = RiskLevel.High;
                 break;
             }
@@ -764,6 +988,7 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ExcelReadRangeArgs>()!;
                 targetSummary = $"{args.WorkbookPath}!{args.SheetName}!{args.RangeAddress}";
+                inputSummary = $"Read {args.RangeAddress}";
                 if (!IsPathAllowed(args.WorkbookPath, policy.AllowedExcelDirectories))
                 {
                     risk = RiskLevel.Prohibited;
@@ -774,6 +999,9 @@ public sealed class PolicyEngine
             {
                 var args = argsElement.Deserialize<ExcelWriteRangeArgs>()!;
                 targetSummary = $"{args.WorkbookPath}!{args.SheetName}!{args.RangeAddress}";
+                inputSummary = args.ValuesRef is not null
+                    ? $"Ref:{args.ValuesRef.SourceNodeId}.{args.ValuesRef.OutputName}"
+                    : $"{args.Values?.Count ?? 0}行データ書き込み";
                 if (!IsPathAllowed(args.WorkbookPath, policy.AllowedExcelDirectories))
                 {
                     risk = RiskLevel.Prohibited;
@@ -786,10 +1014,10 @@ public sealed class PolicyEngine
             }
         }
 
-        return (sideEffects, risk, targetSummary);
+        return (sideEffects, risk, targetSummary, inputSummary);
     }
 
-    private static bool IsPathAllowed(string workbookPath, List<string> allowedDirectories)
+    public static bool IsPathAllowed(string workbookPath, IReadOnlyList<string> allowedDirectories)
     {
         if (allowedDirectories.Count == 0)
         {
@@ -822,11 +1050,18 @@ public sealed class PolicyEngine
         {
             sb.Append(origin.Scheme).Append("://").Append(origin.Host).Append(':').Append(origin.Port).Append(';');
         }
+        sb.Append(definition.Policy.AllowCoordinateClick).Append('|')
+          .Append(definition.Policy.AllowExternalAi).Append('|');
+        foreach (string dir in definition.Policy.AllowedExcelDirectories.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
+        {
+            sb.Append(dir).Append(';');
+        }
         foreach (var act in actions)
         {
             sb.Append(act.NodeId).Append(':')
               .Append(act.ActionType).Append(':')
               .Append(act.TargetSummary).Append(':')
+              .Append(act.InputSummary).Append(':')
               .Append((int)act.SideEffects).Append(':')
               .Append((int)act.EvaluatedRisk).Append('|');
         }

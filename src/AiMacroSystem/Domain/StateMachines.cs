@@ -98,7 +98,8 @@ public static class ActionStateMachine
 
         (ActionExecutionStatus.Retrying, ActionExecutionStatus.Running),
         (ActionExecutionStatus.Retrying, ActionExecutionStatus.Failed),
-        (ActionExecutionStatus.Retrying, ActionExecutionStatus.Cancelled)
+        (ActionExecutionStatus.Retrying, ActionExecutionStatus.Cancelled),
+        (ActionExecutionStatus.Retrying, ActionExecutionStatus.Unknown)
     };
 
     public static bool CanTransition(ActionExecutionStatus from, ActionExecutionStatus to) =>
