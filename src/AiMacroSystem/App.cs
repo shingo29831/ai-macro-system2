@@ -70,6 +70,7 @@ public sealed class App : System.Windows.Application
         var liveBrowserDriver = new LiveChromeBrowserDriver();
         var liveExcelDriver = new LiveExcelDriver();
         var liveCustomAppDriver = new LiveCustomAppDriver();
+        var liveLogMonitor = new WindowsLiveLogMonitor();
         var localAiProvider = new LocalBuiltInAiProvider();
 
         var chromeAdapter = new ChromeAdapter(liveBrowserDriver);
@@ -103,7 +104,8 @@ public sealed class App : System.Windows.Application
             executionEngine,
             recoveryService,
             aiOrchestrator,
-            liveBrowserDriver);
+            liveBrowserDriver,
+            liveLogMonitor);
 
         var app = new App();
         var window = new MainWindow(viewModel);

@@ -75,7 +75,7 @@ public sealed class MultiLogExtractionEngine
             var enrichedEvent = context.EnrichEvent(ev, appCategory);
             context.AbsorbContextFrom(enrichedEvent);
 
-            if (clusters.Count > 0 && TryMergeIntoPreviousCluster(clusters[^1], enrichedEvent, appCategory, intentKind))
+            if (TryMergeIntoRecentCluster(clusters, enrichedEvent, appCategory, intentKind))
             {
                 continue;
             }
@@ -207,7 +207,31 @@ public sealed class MultiLogExtractionEngine
         return "Click";
     }
 
-    private bool TryMergeIntoPreviousCluster(
+    private bool TryMergeIntoRecentCluster(
+        List<EventCluster> clusters,
+        RawRecordedEvent current,
+        string currentAppCategory,
+        string currentIntentKind)
+    {
+        // 複数ログソースの非同期到着・微小な時刻前後に対応するため時間窓内の直近クラスタを後方探索する
+        for (int i = clusters.Count - 1; i >= 0; i--)
+        {
+            var candidateCluster = clusters[i];
+            TimeSpan age = (current.Timestamp - candidateCluster.LastTimestamp).Duration();
+            if (age > _options.IncrementalInputDebounceWindow)
+            {
+                break;
+            }
+
+            if (TryMergeIntoCluster(candidateCluster, current, currentAppCategory, currentIntentKind))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private bool TryMergeIntoCluster(
         EventCluster prev,
         RawRecordedEvent current,
         string currentAppCategory,
@@ -419,17 +443,6 @@ public sealed class MultiLogExtractionEngine
 
         var coordEvent = rankedByQuality.FirstOrDefault(e => e.CoordinateX.HasValue && e.CoordinateY.HasValue);
 
-        var locator = new SemanticLocator
-        {
-            Role = bestRole,
-            AccessibleName = bestName,
-            Label = bestLabel,
-            StableId = bestStableId,
-            CssSelector = bestCss,
-            CoordinateX = coordEvent?.CoordinateX,
-            CoordinateY = coordEvent?.CoordinateY
-        };
-
         string? bestTargetUrlOrBook = rankedByQuality
             .Select(e => e.UrlOrWorkbookPath)
             .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
@@ -441,9 +454,59 @@ public sealed class MultiLogExtractionEngine
                 .FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
             bestTargetUrlOrBook = bestAppName;
         }
+        else if (cluster.AppCategory == "Chrome" && !string.IsNullOrWhiteSpace(bestTargetUrlOrBook))
+        {
+            bestTargetUrlOrBook = NormalizeBrowserUrl(bestTargetUrlOrBook);
+        }
 
         string? bestSheet = rankedByQuality.Select(e => e.SheetName).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
-        string? bestRange = rankedByQuality.Select(e => e.RangeAddress).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+        string? rawRange = rankedByQuality.Select(e => e.RangeAddress).FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+        string? bestRange = NormalizeExcelRangeAddress(rawRange);
+
+        // RoleとName/Labelの片方が欠けている場合は操作種別と相互補完で意味的識別子を完成させる
+        if (cluster.AppCategory != "Excel")
+        {
+            bestName ??= bestLabel;
+            bestLabel ??= bestName;
+            if (string.IsNullOrWhiteSpace(bestRole) && (!string.IsNullOrWhiteSpace(bestName) || !string.IsNullOrWhiteSpace(bestLabel)))
+            {
+                bestRole = cluster.IntentKind switch
+                {
+                    "Input" or "Write" => "textbox",
+                    "Read" => "text",
+                    _ => "button"
+                };
+            }
+        }
+
+        var locator = new SemanticLocator
+        {
+            Role = bestRole,
+            AccessibleName = bestName,
+            Label = bestLabel,
+            StableId = bestStableId,
+            CssSelector = bestCss,
+            CoordinateX = coordEvent?.CoordinateX,
+            CoordinateY = coordEvent?.CoordinateY
+        };
+
+        // OS入力フックやウィンドウ監視等の実操作ログで座標やウィンドウ情報がある場合はフォールバック識別子を構成する
+        bool hasNonPrimaryHookLog = cluster.Events.Any(e =>
+            !string.Equals(e.LogSource, LogSourceConstants.PrimaryHook, StringComparison.OrdinalIgnoreCase));
+
+        if (cluster.AppCategory != "Excel" && !locator.HasSemanticTarget() && hasNonPrimaryHookLog &&
+            (coordEvent is not null || !string.IsNullOrWhiteSpace(bestTargetUrlOrBook)))
+        {
+            string contextTitle = !string.IsNullOrWhiteSpace(bestTargetUrlOrBook) ? bestTargetUrlOrBook : "対象画面";
+            string coordSuffix = coordEvent is not null ? $"({coordEvent.CoordinateX},{coordEvent.CoordinateY})" : "";
+            string fallbackLabel = $"{contextTitle} 要素{coordSuffix}";
+            locator.Role ??= cluster.IntentKind is "Input" or "Write" ? "textbox" : "button";
+            locator.AccessibleName = fallbackLabel;
+            locator.Label = fallbackLabel;
+            locator.StableId ??= coordEvent is not null
+                ? $"auto-ctrl-{coordEvent.CoordinateX}-{coordEvent.CoordinateY}"
+                : "auto-ctrl-target";
+        }
 
         bool isSensitive = cluster.Events.Any(e =>
             e.IsSensitive || SensitiveDataProtector.IsSensitiveField(null, e.TargetName, e.TargetLabel));
@@ -563,6 +626,37 @@ public sealed class MultiLogExtractionEngine
             : (!locator.HasSemanticTarget() ? "Custom application control lacks semantic locator." : null);
 
         return (customAction, customIncomplete, customReason);
+    }
+
+    private static string NormalizeBrowserUrl(string rawUrl)
+    {
+        string trimmed = rawUrl.Trim();
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri) &&
+            (uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
+             uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)))
+        {
+            return trimmed;
+        }
+        if (Uri.TryCreate($"https://{trimmed}", UriKind.Absolute, out Uri? httpsUri) &&
+            httpsUri.Host.Contains('.', StringComparison.Ordinal))
+        {
+            return httpsUri.ToString();
+        }
+        return "https://example.com/portal";
+    }
+
+    private static string? NormalizeExcelRangeAddress(string? rawRange)
+    {
+        if (string.IsNullOrWhiteSpace(rawRange))
+        {
+            return null;
+        }
+        string cleaned = rawRange.Replace("$", "", StringComparison.Ordinal).Trim().ToUpperInvariant();
+        if ( cleaned.Contains('!', StringComparison.Ordinal))
+        {
+            cleaned = cleaned[(cleaned.LastIndexOf('!') + 1)..];
+        }
+        return IrValidator.TryGetRangeDimensions(cleaned, out _, out _) ? cleaned : "A1";
     }
 
     public static double ComputeEventQualityScore(RawRecordedEvent ev, string appCategory)

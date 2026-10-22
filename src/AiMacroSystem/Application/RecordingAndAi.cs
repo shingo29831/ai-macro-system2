@@ -82,10 +82,17 @@ public sealed record NormalizedActionCandidate(
     bool IsAmbiguous,
     string? AmbiguityReason);
 
+public interface ILiveOperationLogCollector
+{
+    void Start(RecordingService recordingService, Action<RawRecordedEvent>? onEventCaptured = null);
+    void StopAndFlush();
+}
+
 public sealed class RecordingService
 {
     private readonly SqliteRepository? _repository;
     private readonly List<RawRecordedEvent> _events = new();
+    private DateTimeOffset _monotonicClock = DateTimeOffset.UtcNow;
     public bool IsRecording { get; private set; }
 
     public RecordingService(SqliteRepository? repository = null)
@@ -96,12 +103,47 @@ public sealed class RecordingService
     public void StartRecording()
     {
         _events.Clear();
+        _monotonicClock = DateTimeOffset.UtcNow;
         IsRecording = true;
     }
 
     public void StopRecording()
     {
         IsRecording = false;
+    }
+
+    // 連続した操作グループの記録時にタイムスタンプの逆転・交錯を防ぐため論理クロックを進める
+    public DateTimeOffset AdvanceLogicalClock(TimeSpan step)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (now > _monotonicClock)
+        {
+            _monotonicClock = now;
+        }
+        _monotonicClock = _monotonicClock.Add(step);
+        return _monotonicClock;
+    }
+
+    private DateTimeOffset ResolveMonotonicTimestamp(DateTimeOffset? overrideTimestamp)
+    {
+        if (overrideTimestamp.HasValue)
+        {
+            if (overrideTimestamp.Value > _monotonicClock)
+            {
+                _monotonicClock = overrideTimestamp.Value;
+            }
+            return overrideTimestamp.Value;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        if (now <= _monotonicClock)
+        {
+            _monotonicClock = _monotonicClock.AddMilliseconds(5);
+            return _monotonicClock;
+        }
+
+        _monotonicClock = now;
+        return now;
     }
 
     public RawRecordedEvent RecordEvent(
@@ -132,6 +174,8 @@ public sealed class RecordingService
 
         string? safeUrlOrPath = SensitiveDataProtector.SanitizeText(urlOrWorkbookPath);
 
+        var resolvedTimestamp = ResolveMonotonicTimestamp(timestampOverride);
+
         var ev = new RawRecordedEvent(
             EventId: $"evt-{Guid.NewGuid():N}",
             ApplicationKind: applicationKind,
@@ -145,7 +189,7 @@ public sealed class RecordingService
             RangeAddress: rangeAddress,
             CapturedValue: safeValue,
             IsSensitive: sensitive,
-            Timestamp: timestampOverride ?? DateTimeOffset.UtcNow,
+            Timestamp: resolvedTimestamp,
             LogSource: string.IsNullOrWhiteSpace(logSource) ? LogSourceConstants.PrimaryHook : logSource,
             CssSelector: cssSelector,
             CoordinateX: coordinateX,

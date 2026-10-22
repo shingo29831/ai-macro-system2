@@ -25,6 +25,11 @@ public sealed class EasyStepItem
     public string BlockIcon { get; init; } = "⚙️";
     public string BlockCategory { get; init; } = "操作ブロック";
     public string AccentColorHex { get; init; } = "#2563EB";
+    public string TargetAppBadge { get; init; } = "アプリ";
+    public string TargetLocationSummary { get; init; } = string.Empty;
+    public string OperationValueSummary { get; init; } = string.Empty;
+    public string SourceLogSummary { get; init; } = "複数ログ統合抽出";
+    public bool IsSelectedForEdit { get; set; }
     public bool HasNextBlock { get; set; }
 }
 
@@ -59,6 +64,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly RecoveryService _recoveryService;
     private readonly AiOrchestrator? _aiOrchestrator;
     private readonly LiveChromeBrowserDriver? _liveBrowserDriver;
+    private readonly ILiveOperationLogCollector? _liveLogCollector;
 
     private string _statusBanner = "準備完了：「▶ 実行」ですぐに開始できます";
     private string _workflowNameInput = "毎日のWeb入力とExcel転記マクロ";
@@ -90,11 +96,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _openSystemBrowserOnNavigate;
 
     private WorkflowVersionRecord? _selectedMacroInList;
+    private EasyStepItem? _selectedStepForEdit;
     private bool _isEditingMode;
     private bool _isExecutingMacro;
     private bool _isRecordingMacro;
     private string _runningProgressText = "実行中...";
     private string _recordingProgressText = "記録中: 複数ログ（Web / Excel / 独自アプリ）から操作を監視しています...";
+    private string _editingBlockHeaderText = "ブロックの追加・選択編集";
+
+    public event Action? VisualBlocksUpdated;
 
     public MainViewModel(
         SqliteRepository repository,
@@ -106,7 +116,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ExecutionEngine executionEngine,
         RecoveryService recoveryService,
         AiOrchestrator? aiOrchestrator = null,
-        LiveChromeBrowserDriver? liveBrowserDriver = null)
+        LiveChromeBrowserDriver? liveBrowserDriver = null,
+        ILiveOperationLogCollector? liveLogCollector = null)
     {
         _repository = repository;
         _workflowService = workflowService;
@@ -118,6 +129,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _recoveryService = recoveryService;
         _aiOrchestrator = aiOrchestrator;
         _liveBrowserDriver = liveBrowserDriver;
+        _liveLogCollector = liveLogCollector;
     }
 
     public ObservableCollection<WorkflowVersionRecord> WorkflowVersions { get; } = new();
@@ -328,6 +340,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get => _selectedMacroInList;
         set { _selectedMacroInList = value; OnPropertyChanged(); }
+    }
+
+    public EasyStepItem? SelectedStepForEdit
+    {
+        get => _selectedStepForEdit;
+        set
+        {
+            _selectedStepForEdit = value;
+            EditingBlockHeaderText = value is not null
+                ? $"✏ ブロック #{value.StepNumber} ({value.FriendlyTitle}) を編集中"
+                : "ブロックの追加・選択編集（左のブロックをクリックすると編集できます）";
+            OnPropertyChanged();
+        }
+    }
+
+    public string EditingBlockHeaderText
+    {
+        get => _editingBlockHeaderText;
+        set { _editingBlockHeaderText = value; OnPropertyChanged(); }
     }
 
     public bool IsEditingMode
@@ -564,6 +595,165 @@ public sealed class MainViewModel : INotifyPropertyChanged
         ValidateCurrentEditorIr();
     }
 
+    public void SelectStepForEditing(EasyStepItem? item)
+    {
+        foreach (var step in EasySteps)
+        {
+            step.IsSelectedForEdit = ReferenceEquals(step, item);
+        }
+        SelectedStepForEdit = item;
+
+        if (item is null)
+        {
+            VisualBlocksUpdated?.Invoke();
+            return;
+        }
+
+        SelectedActionKind = item.ActionType;
+        if (item.UnderlyingNode.Args.HasValue)
+        {
+            JsonElement args = item.UnderlyingNode.Args.Value;
+            switch (item.ActionType)
+            {
+                case IrConstants.ActionChromeNavigate:
+                {
+                    var a = args.Deserialize<ChromeNavigateArgs>();
+                    if (a is not null) StepUrlInput = a.Url;
+                    break;
+                }
+                case IrConstants.ActionChromeFill:
+                {
+                    var a = args.Deserialize<ChromeFillArgs>();
+                    if (a is not null)
+                    {
+                        StepElementNameInput = a.Locator?.Label ?? a.Locator?.AccessibleName ?? string.Empty;
+                        StepIsPasswordInput = a.IsSensitive;
+                        if (!a.IsSensitive && a.Value is not null) StepFillValueInput = a.Value;
+                    }
+                    break;
+                }
+                case IrConstants.ActionChromeClick:
+                {
+                    var a = args.Deserialize<ChromeClickArgs>();
+                    if (a is not null)
+                    {
+                        StepElementNameInput = a.Locator?.AccessibleName ?? a.Locator?.Label ?? string.Empty;
+                    }
+                    break;
+                }
+                case IrConstants.ActionChromeSubmit:
+                {
+                    var a = args.Deserialize<ChromeSubmitArgs>();
+                    if (a is not null)
+                    {
+                        StepUrlInput = a.DestinationUrl;
+                        StepElementNameInput = a.Locator?.AccessibleName ?? a.Locator?.Label ?? string.Empty;
+                    }
+                    break;
+                }
+                case IrConstants.ActionExcelReadRange:
+                {
+                    var a = args.Deserialize<ExcelReadRangeArgs>();
+                    if (a is not null)
+                    {
+                        StepExcelPathInput = a.WorkbookPath;
+                        StepExcelSheetInput = a.SheetName;
+                        StepExcelRangeInput = a.RangeAddress;
+                    }
+                    break;
+                }
+                case IrConstants.ActionExcelWriteRange:
+                {
+                    var a = args.Deserialize<ExcelWriteRangeArgs>();
+                    if (a is not null)
+                    {
+                        StepExcelPathInput = a.WorkbookPath;
+                        StepExcelSheetInput = a.SheetName;
+                        StepExcelRangeInput = a.RangeAddress;
+                        if (a.Values is { Count: > 0 })
+                        {
+                            StepExcelWriteTextInput = string.Join("\n", a.Values.Select(r => string.Join(",", r)));
+                        }
+                    }
+                    break;
+                }
+                case IrConstants.ActionCustomAppClick:
+                {
+                    var a = args.Deserialize<CustomAppClickArgs>();
+                    if (a is not null)
+                    {
+                        StepCustomAppNameInput = a.ApplicationName;
+                        StepElementNameInput = a.Locator?.AccessibleName ?? a.Locator?.Label ?? string.Empty;
+                    }
+                    break;
+                }
+                case IrConstants.ActionCustomAppFill:
+                {
+                    var a = args.Deserialize<CustomAppFillArgs>();
+                    if (a is not null)
+                    {
+                        StepCustomAppNameInput = a.ApplicationName;
+                        StepElementNameInput = a.Locator?.Label ?? a.Locator?.AccessibleName ?? string.Empty;
+                        StepIsPasswordInput = a.IsSensitive;
+                        if (!a.IsSensitive && a.Value is not null) StepFillValueInput = a.Value;
+                    }
+                    break;
+                }
+                case IrConstants.ActionCustomAppReadText:
+                {
+                    var a = args.Deserialize<CustomAppReadTextArgs>();
+                    if (a is not null)
+                    {
+                        StepCustomAppNameInput = a.ApplicationName;
+                        StepElementNameInput = a.Locator?.Label ?? a.Locator?.AccessibleName ?? string.Empty;
+                    }
+                    break;
+                }
+            }
+        }
+
+        VisualBlocksUpdated?.Invoke();
+        StatusBanner = $"✏ ブロック #{item.StepNumber}「{item.FriendlyTitle}」を選択しました。中央パネルで内容を編集できます。";
+    }
+
+    public void UpdateSelectedStepFromBuilderUi()
+    {
+        if (SelectedStepForEdit is null)
+        {
+            AddStepFromBuilderUi();
+            return;
+        }
+
+        int index = EasySteps.IndexOf(SelectedStepForEdit);
+        if (index < 0)
+        {
+            AddStepFromBuilderUi();
+            return;
+        }
+
+        var preservedCandidateIds = SelectedStepForEdit.UnderlyingNode.SourceCandidateIds;
+        var updatedItem = CreateStepItemFromInputs(
+            index + 1,
+            SelectedActionKind,
+            StepUrlInput,
+            StepElementNameInput,
+            StepFillValueInput,
+            StepIsPasswordInput,
+            StepExcelPathInput,
+            StepExcelSheetInput,
+            StepExcelRangeInput,
+            StepExcelWriteTextInput,
+            preservedCandidateIds);
+
+        updatedItem.IsSelectedForEdit = true;
+        EasySteps[index] = updatedItem;
+        SelectedStepForEdit = updatedItem;
+
+        RebuildIrJsonFromEasySteps();
+        VisualBlocksUpdated?.Invoke();
+        StatusBanner = $"✅ ブロック #{updatedItem.StepNumber}「{updatedItem.FriendlyTitle}」の編集内容を反映しました。";
+    }
+
     public void AddStepFromBuilderUi()
     {
         AddEasyStepInternal(
@@ -578,6 +768,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             StepExcelWriteTextInput);
 
         RebuildIrJsonFromEasySteps();
+        VisualBlocksUpdated?.Invoke();
         StatusBanner = $"➕ 手順ステップ {EasySteps.Count} を追加し、安全チェックを更新しました。";
     }
 
@@ -615,38 +806,64 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string range,
         string excelText)
     {
+        var item = CreateStepItemFromInputs(
+            EasySteps.Count + 1,
+            actionKind,
+            url,
+            elementName,
+            fillVal,
+            isSens,
+            excelPath,
+            sheet,
+            range,
+            excelText,
+            null);
+        EasySteps.Add(item);
+    }
+
+    private EasyStepItem CreateStepItemFromInputs(
+        int stepNumber,
+        string actionKind,
+        string url,
+        string elementName,
+        string fillVal,
+        bool isSens,
+        string excelPath,
+        string sheet,
+        string range,
+        string excelText,
+        List<string>? sourceCandidateIds)
+    {
         string customAppName = string.IsNullOrWhiteSpace(StepCustomAppNameInput) ? "基幹業務システム" : StepCustomAppNameInput.Trim();
-        int num = EasySteps.Count + 1;
-        string nodeId = $"step-{num}";
+        string safeElem = string.IsNullOrWhiteSpace(elementName) ? "対象要素" : elementName.Trim();
+        string safeUrl = string.IsNullOrWhiteSpace(url) ? "https://example.com/portal" : url.Trim();
+        string safeRange = string.IsNullOrWhiteSpace(range) ? "A1" : range.Trim().Replace("$", "").ToUpperInvariant();
+        string nodeId = $"step-{stepNumber}";
         WorkflowNode node;
-        string title;
-        string detail;
 
         switch (actionKind)
         {
             case IrConstants.ActionChromeNavigate:
-                title = "🌐 Webページを開く";
-                detail = $"移動先URL: {url}";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionChromeNavigate,
-                    Args = JsonSerializer.SerializeToElement(new ChromeNavigateArgs { Url = url.Trim() })
+                    SourceCandidateIds = sourceCandidateIds,
+                    Args = JsonSerializer.SerializeToElement(new ChromeNavigateArgs { Url = safeUrl })
                 };
                 break;
 
             case IrConstants.ActionChromeFill:
-                title = "✏️ Webの入力欄に文字を入れる";
-                detail = $"入力欄「{elementName}」へ「{(isSens ? "******** (保護)" : fillVal)}」を入力";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionChromeFill,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
                     {
-                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = elementName.Trim(), Label = elementName.Trim() },
+                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = safeElem, Label = safeElem },
                         Value = isSens ? SensitiveDataProtector.RedactedPlaceholder : fillVal,
                         IsSensitive = isSens
                     })
@@ -654,82 +871,77 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 break;
 
             case IrConstants.ActionChromeClick:
-                title = "👆 Webのボタンをクリックする";
-                detail = $"ボタン名: 「{elementName}」";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionChromeClick,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeClickArgs
                     {
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = elementName.Trim(), Label = elementName.Trim() }
+                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem }
                     })
                 };
                 break;
 
             case IrConstants.ActionChromeSubmit:
-                title = "📤 Webのフォームを送信する（外部送信）";
-                detail = $"送信ボタン「{elementName}」 / 送信先: {url}";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionChromeSubmit,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeSubmitArgs
                     {
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = elementName.Trim(), Label = elementName.Trim() },
-                        DestinationUrl = url.Trim(),
+                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem },
+                        DestinationUrl = safeUrl,
                         ExpectedSuccessSelector = "#submit-success"
                     })
                 };
                 break;
 
             case IrConstants.ActionExcelReadRange:
-                title = "📖 Excelのセル範囲を読み取る";
-                detail = $"ファイル: {Path.GetFileName(excelPath)} / シート: {sheet} / 範囲: {range}";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionExcelReadRange,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ExcelReadRangeArgs
                     {
                         WorkbookPath = excelPath.Trim(),
                         SheetName = sheet.Trim(),
-                        RangeAddress = range.Trim().ToUpperInvariant()
+                        RangeAddress = safeRange
                     })
                 };
                 break;
 
             case IrConstants.ActionCustomAppClick:
-                title = "🖥 独自アプリのボタンを押す";
-                detail = $"アプリ「{customAppName}」 / 対象: 「{elementName}」";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionCustomAppClick,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new CustomAppClickArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = elementName.Trim(), Label = elementName.Trim() }
+                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem }
                     })
                 };
                 break;
 
             case IrConstants.ActionCustomAppFill:
-                title = "⌨️ 独自アプリに文字を入力";
-                detail = $"アプリ「{customAppName}」 / 「{elementName}」へ「{(isSens ? "******** (保護)" : fillVal)}」を入力";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionCustomAppFill,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new CustomAppFillArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = elementName.Trim(), Label = elementName.Trim() },
+                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = safeElem, Label = safeElem },
                         Value = isSens ? SensitiveDataProtector.RedactedPlaceholder : fillVal,
                         IsSensitive = isSens
                     })
@@ -737,55 +949,64 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 break;
 
             case IrConstants.ActionCustomAppReadText:
-                title = "🔍 独自アプリの文字を読み取る";
-                detail = $"アプリ「{customAppName}」 / 対象: 「{elementName}」";
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionCustomAppReadText,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new CustomAppReadTextArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "text", AccessibleName = elementName.Trim(), Label = elementName.Trim() }
+                        Locator = new SemanticLocator { Role = "text", AccessibleName = safeElem, Label = safeElem }
                     })
                 };
                 break;
 
             default:
-                title = "📝 Excelのセル範囲に書き込む";
-                detail = $"ファイル: {Path.GetFileName(excelPath)} / シート: {sheet} / 範囲: {range}";
-                var rows = ParseCsvMatrix(excelText);
+            {
+                var rows = AdjustMatrixToRange(ParseCsvMatrix(excelText), safeRange);
                 node = new WorkflowNode
                 {
                     NodeId = nodeId,
                     Type = IrConstants.NodeTypeAction,
                     ActionType = IrConstants.ActionExcelWriteRange,
+                    SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ExcelWriteRangeArgs
                     {
                         WorkbookPath = excelPath.Trim(),
                         SheetName = sheet.Trim(),
-                        RangeAddress = range.Trim().ToUpperInvariant(),
+                        RangeAddress = safeRange,
                         Values = rows
                     })
                 };
                 break;
+            }
         }
 
-        var (icon, category, colorHex) = GetBlockVisualMeta(actionKind);
-        EasySteps.Add(new EasyStepItem
+        return BuildEasyStepItemFromNode(node, stepNumber, false);
+    }
+
+    private static List<List<string>> AdjustMatrixToRange(List<List<string>> rawRows, string rangeAddress)
+    {
+        if (!IrValidator.TryGetRangeDimensions(rangeAddress, out int targetRows, out int targetCols))
         {
-            StepNumber = num,
-            NodeId = nodeId,
-            ActionType = actionKind,
-            FriendlyTitle = title,
-            FriendlyDetail = detail,
-            UnderlyingNode = node,
-            BlockIcon = icon,
-            BlockCategory = category,
-            AccentColorHex = colorHex,
-            HasNextBlock = false
-        });
+            return rawRows;
+        }
+        var adjusted = new List<List<string>>(targetRows);
+        for (int r = 0; r < targetRows; r++)
+        {
+            var row = new List<string>(targetCols);
+            for (int c = 0; c < targetCols; c++)
+            {
+                string val = (r < rawRows.Count && c < rawRows[r].Count)
+                    ? rawRows[r][c]
+                    : (rawRows.Count > 0 && rawRows[0].Count > 0 ? rawRows[0][0] : "データ");
+                row.Add(val);
+            }
+            adjusted.Add(row);
+        }
+        return adjusted;
     }
 
     private static (string Icon, string Category, string ColorHex) GetBlockVisualMeta(string actionKind) =>
@@ -1221,6 +1442,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RecordedEvents.Clear();
         RecordingProgressText = "記録中: 操作ログ（ブラウザ / Excel / 独自アプリ）を収集しています...";
         IsRecordingMacro = true;
+        _liveLogCollector?.Start(_recordingService, ev =>
+        {
+            System.Windows.Application.Current?.Dispatcher?.InvokeAsync(() =>
+            {
+                RecordedEvents.Add(ev);
+                RecordingProgressText = $"記録中 ({RecordedEvents.Count} ログ): [{ev.ApplicationKind}] {ev.EventKind} ({ev.TargetLabel ?? ev.UrlOrWorkbookPath ?? ev.LogSource})";
+            });
+        });
         StatusBanner = "🔴 操作記録を開始しました。画面上部の「記録中」バーから記録終了すると自動でマクロに変換されます。";
     }
 
@@ -1233,6 +1462,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         try
         {
+            _liveLogCollector?.StopAndFlush();
+
             // 記録中に個別イベントが未投入の場合は複数アプリの標準操作ログ群を自動収集してから停止する
             if (_recordingService.GetRecordedEvents().Count == 0)
             {
@@ -1245,6 +1476,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _recordingService.StopRecording();
             await GenerateMacroFromRecordingViaAiAsync();
             IsEditingMode = true;
+            VisualBlocksUpdated?.Invoke();
         }
         finally
         {
@@ -1255,15 +1487,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void RecordSimulatedWebOpen()
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var now = DateTimeOffset.UtcNow;
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(500));
         var evNoise = _recordingService.RecordEvent(
             "Chrome", "WindowActivate", null, null, null, null, null,
             StepUrlInput, null, null, null,
-            logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.5, timestampOverride: now);
+            logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.5, timestampOverride: baseTs);
         var evDom = _recordingService.RecordEvent(
             "Chrome", "Navigate", null, null, null, null, null,
             StepUrlInput, null, null, null,
-            logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(30));
+            logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.99, timestampOverride: baseTs.AddMilliseconds(30));
 
         RecordedEvents.Add(evNoise);
         RecordedEvents.Add(evDom);
@@ -1274,7 +1506,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void RecordSimulatedWebInput(bool asPassword)
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var now = DateTimeOffset.UtcNow;
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(500));
         string targetName = asPassword ? "Password" : StepElementNameInput;
         string targetLabel = asPassword ? "パスワード" : StepElementNameInput;
         string rawVal = asPassword ? "SecretPass123!" : StepFillValueInput;
@@ -1283,17 +1515,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             "Chrome", "Input", asPassword ? "password" : "text", null, null, null, null,
             null, null, null, rawVal[..Math.Min(2, rawVal.Length)],
             logSource: LogSourceConstants.OsInputHook, coordinateX: 300, coordinateY: 220,
-            sourceConfidence: 0.3, timestampOverride: now);
+            sourceConfidence: 0.3, timestampOverride: baseTs);
         var evUia = _recordingService.RecordEvent(
             "Chrome", "Input", asPassword ? "password" : "text", "textbox", targetName, null, null,
             StepUrlInput, null, null, rawVal,
             logSource: LogSourceConstants.UiAutomation, coordinateX: 300, coordinateY: 220,
-            sourceConfidence: 0.88, timestampOverride: now.AddMilliseconds(60));
+            sourceConfidence: 0.88, timestampOverride: baseTs.AddMilliseconds(60));
         var evDom = _recordingService.RecordEvent(
             "Chrome", "Input", asPassword ? "password" : "text", "textbox", targetName, targetLabel, $"field-{targetName}",
             StepUrlInput, null, null, rawVal,
             logSource: LogSourceConstants.BrowserDom, cssSelector: $"#field-{targetName}",
-            sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(110));
+            sourceConfidence: 0.99, timestampOverride: baseTs.AddMilliseconds(110));
 
         RecordedEvents.Add(evHook);
         RecordedEvents.Add(evUia);
@@ -1307,15 +1539,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void RecordSimulatedExcelWrite()
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var now = DateTimeOffset.UtcNow;
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(500));
         var evSelect = _recordingService.RecordEvent(
             "Excel", "SelectionChange", null, null, null, null, null,
             StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, null,
-            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.7, timestampOverride: now);
+            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.7, timestampOverride: baseTs);
         var evWrite = _recordingService.RecordEvent(
             "Excel", "Write", null, null, null, null, null,
             StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, StepExcelWriteTextInput,
-            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(50));
+            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.99, timestampOverride: baseTs.AddMilliseconds(50));
 
         RecordedEvents.Add(evSelect);
         RecordedEvents.Add(evWrite);
@@ -1326,7 +1558,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public void RecordSimulatedCustomAppAction()
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var now = DateTimeOffset.UtcNow;
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(500));
         string appName = string.IsNullOrWhiteSpace(StepCustomAppNameInput) ? "基幹業務システム" : StepCustomAppNameInput.Trim();
         string controlName = string.IsNullOrWhiteSpace(StepElementNameInput) ? "受注番号" : StepElementNameInput.Trim();
         string fillVal = string.IsNullOrWhiteSpace(StepFillValueInput) ? "ORD-2026-001" : StepFillValueInput;
@@ -1336,17 +1568,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
             "CustomApp", "Input", null, null, null, null, null,
             appName, null, null, fillVal[..Math.Min(3, fillVal.Length)],
             logSource: LogSourceConstants.OsInputHook, coordinateX: 280, coordinateY: 190,
-            sourceConfidence: 0.3, windowOrProcessName: appName, timestampOverride: now);
+            sourceConfidence: 0.3, windowOrProcessName: appName, timestampOverride: baseTs);
         var evUia = _recordingService.RecordEvent(
             "CustomApp", "Input", "text", "textbox", controlName, controlName, null,
             appName, null, null, fillVal,
             logSource: LogSourceConstants.UiAutomation, coordinateX: 280, coordinateY: 190,
-            sourceConfidence: 0.90, windowOrProcessName: appName, timestampOverride: now.AddMilliseconds(80));
+            sourceConfidence: 0.90, windowOrProcessName: appName, timestampOverride: baseTs.AddMilliseconds(80));
         var evApp = _recordingService.RecordEvent(
             "CustomApp", "Input", "text", "textbox", controlName, controlName, $"ctrl-{controlName}",
             appName, null, null, fillVal,
             logSource: LogSourceConstants.CustomAppHook,
-            sourceConfidence: 0.99, windowOrProcessName: appName, timestampOverride: now.AddMilliseconds(120));
+            sourceConfidence: 0.99, windowOrProcessName: appName, timestampOverride: baseTs.AddMilliseconds(120));
 
         RecordedEvents.Add(evHook);
         RecordedEvents.Add(evUia);
@@ -1365,13 +1597,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         var candidates = _normalizationService.Normalize(rawList);
+        var policy = new PolicyDeclaration
+        {
+            AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
+            AllowExternalAi = AllowExternalAiPolicy
+        };
+
         if (_aiOrchestrator is not null)
         {
-            var policy = new PolicyDeclaration
-            {
-                AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
-                AllowExternalAi = AllowExternalAiPolicy
-            };
             var outcome = await _aiOrchestrator.GenerateAndValidateIrAsync(candidates, policy, AllowExternalAiPolicy, default);
             RefreshAllListsFromDatabase();
 
@@ -1387,11 +1620,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 }
                 RebuildEasyStepsFromIrJson(outcome.RawJson);
                 ValidateCurrentEditorIr();
-                StatusBanner = "✨ AIが記録から安全なマクロを作成し、8段階すべての安全検証に合格しました！";
+                IsEditingMode = true;
+                VisualBlocksUpdated?.Invoke();
+                StatusBanner = $"✨ 複数ログ（{rawList.Count}件）から {EasySteps.Count} 個の操作ブロックを抽出し、マクロ化しました！";
                 return;
             }
             StatusBanner = $"⚠️ AI生成結果が安全基準でブロックされました: {outcome.ErrorReason}";
+            return;
         }
+
+        GenerateMacroFromRecordingSynchronously();
+        IsEditingMode = true;
+        VisualBlocksUpdated?.Invoke();
     }
 
     public void LoadSelectedVersionIntoEditor(WorkflowVersionRecord version)
@@ -1411,39 +1651,163 @@ public sealed class MainViewModel : INotifyPropertyChanged
         try
         {
             var def = JsonSerializer.Deserialize<WorkflowDefinition>(irJson);
-            if (def?.Root?.Children is null) return;
+            if (def?.Root is null) return;
+
+            var actionNodes = new List<WorkflowNode>();
+            CollectActionNodesRecursive(def.Root, actionNodes);
+            if (actionNodes.Count == 0) return;
 
             EasySteps.Clear();
-            int total = def.Root.Children.Count;
-            int idx = 1;
-            foreach (var node in def.Root.Children)
+            SelectedStepForEdit = null;
+            int total = actionNodes.Count;
+            for (int i = 0; i < total; i++)
             {
-                if (node.Type != IrConstants.NodeTypeAction || string.IsNullOrWhiteSpace(node.ActionType))
-                {
-                    continue;
-                }
-
-                var (title, detail) = DescribeActionNode(node);
-                var (icon, category, colorHex) = GetBlockVisualMeta(node.ActionType);
-                EasySteps.Add(new EasyStepItem
-                {
-                    StepNumber = idx,
-                    NodeId = node.NodeId,
-                    ActionType = node.ActionType,
-                    FriendlyTitle = title,
-                    FriendlyDetail = detail,
-                    UnderlyingNode = node,
-                    BlockIcon = icon,
-                    BlockCategory = category,
-                    AccentColorHex = colorHex,
-                    HasNextBlock = idx < total
-                });
-                idx++;
+                var node = actionNodes[i];
+                var stepItem = BuildEasyStepItemFromNode(node, i + 1, i + 1 < total);
+                EasySteps.Add(stepItem);
             }
+            VisualBlocksUpdated?.Invoke();
         }
         catch
         {
             // カスタムIR構造の場合は既存のJSON文字列をそのまま保持
+        }
+    }
+
+    private static void CollectActionNodesRecursive(WorkflowNode node, List<WorkflowNode> acc)
+    {
+        if (node.Type == IrConstants.NodeTypeAction && !string.IsNullOrWhiteSpace(node.ActionType))
+        {
+            acc.Add(node);
+            return;
+        }
+        if (node.Children is not null) foreach (var c in node.Children) CollectActionNodesRecursive(c, acc);
+        if (node.ThenChildren is not null) foreach (var c in node.ThenChildren) CollectActionNodesRecursive(c, acc);
+        if (node.ElseChildren is not null) foreach (var c in node.ElseChildren) CollectActionNodesRecursive(c, acc);
+        if (node.BodyChildren is not null) foreach (var c in node.BodyChildren) CollectActionNodesRecursive(c, acc);
+    }
+
+    private EasyStepItem BuildEasyStepItemFromNode(WorkflowNode node, int stepNumber, bool hasNextBlock)
+    {
+        string actionType = node.ActionType ?? IrConstants.ActionChromeClick;
+        var (title, detail) = DescribeActionNode(node);
+        var (icon, category, colorHex) = GetBlockVisualMeta(actionType);
+        var (appBadge, targetLoc, opValue) = ExtractStructuredBlockInfo(node);
+
+        string sourceLogSummary = "ブロック編集により構成";
+        var tracedEvents = _workflowService.TraceNodeToRawEvents(node);
+        if (tracedEvents.Count > 0)
+        {
+            var distinctSources = tracedEvents
+                .Select(e => e.LogSource)
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            sourceLogSummary = $"抽出元ログ ({tracedEvents.Count}件統合): {string.Join(" + ", distinctSources)}";
+        }
+        else if (node.SourceCandidateIds is { Count: > 0 })
+        {
+            var memEvents = _recordingService.GetRecordedEvents();
+            if (memEvents.Count > 0)
+            {
+                var distinctSources = memEvents
+                    .Select(e => e.LogSource)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                sourceLogSummary = $"抽出元ログ: {string.Join(" + ", distinctSources)}";
+            }
+        }
+
+        return new EasyStepItem
+        {
+            StepNumber = stepNumber,
+            NodeId = string.IsNullOrWhiteSpace(node.NodeId) ? $"step-{stepNumber}" : node.NodeId,
+            ActionType = actionType,
+            FriendlyTitle = title,
+            FriendlyDetail = detail,
+            UnderlyingNode = node,
+            BlockIcon = icon,
+            BlockCategory = category,
+            AccentColorHex = colorHex,
+            TargetAppBadge = appBadge,
+            TargetLocationSummary = targetLoc,
+            OperationValueSummary = opValue,
+            SourceLogSummary = sourceLogSummary,
+            HasNextBlock = hasNextBlock
+        };
+    }
+
+    private static (string AppBadge, string TargetLocation, string OperationValue) ExtractStructuredBlockInfo(WorkflowNode node)
+    {
+        if (!node.Args.HasValue)
+        {
+            return ("システム", node.ActionType ?? "操作", "-");
+        }
+
+        JsonElement args = node.Args.Value;
+        switch (node.ActionType)
+        {
+            case IrConstants.ActionChromeNavigate:
+            {
+                var a = args.Deserialize<ChromeNavigateArgs>();
+                return ("Chrome ブラウザ", $"URL: {a?.Url}", "Webページ遷移・オリジン検証");
+            }
+            case IrConstants.ActionChromeFill:
+            {
+                var a = args.Deserialize<ChromeFillArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                string val = a?.IsSensitive == true ? "[REDACTED] (機密保護)" : (a?.Value ?? string.Empty);
+                return ("Chrome ブラウザ", $"要素: {key} ({strategy})", $"入力値: 「{val}」");
+            }
+            case IrConstants.ActionChromeClick:
+            {
+                var a = args.Deserialize<ChromeClickArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                return ("Chrome ブラウザ", $"要素: {key} ({strategy})", "クリック操作・一意性検証");
+            }
+            case IrConstants.ActionChromeSubmit:
+            {
+                var a = args.Deserialize<ChromeSubmitArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                return ("Chrome ブラウザ", $"送信先: {a?.DestinationUrl} / 要素: {key} ({strategy})", $"事後検証: {a?.ExpectedSuccessSelector}");
+            }
+            case IrConstants.ActionExcelReadRange:
+            {
+                var a = args.Deserialize<ExcelReadRangeArgs>();
+                return ("Excel", $"ブック: {Path.GetFileName(a?.WorkbookPath ?? "")} [{a?.SheetName}!{a?.RangeAddress}]", $"セル範囲読み取り ({a?.RangeAddress})");
+            }
+            case IrConstants.ActionExcelWriteRange:
+            {
+                var a = args.Deserialize<ExcelWriteRangeArgs>();
+                string valPreview = a?.Values is { Count: > 0 }
+                    ? string.Join(" / ", a.Values.Select(r => string.Join(", ", r)))
+                    : "参照データ書き込み";
+                return ("Excel", $"ブック: {Path.GetFileName(a?.WorkbookPath ?? "")} [{a?.SheetName}!{a?.RangeAddress}]", $"書込値: {valPreview}");
+            }
+            case IrConstants.ActionCustomAppClick:
+            {
+                var a = args.Deserialize<CustomAppClickArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                string appName = string.IsNullOrWhiteSpace(a?.ApplicationName) ? "独自アプリ" : a.ApplicationName;
+                return ($"独自アプリ ({appName})", $"要素: {key} ({strategy})", "コントロールクリック操作");
+            }
+            case IrConstants.ActionCustomAppFill:
+            {
+                var a = args.Deserialize<CustomAppFillArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                string appName = string.IsNullOrWhiteSpace(a?.ApplicationName) ? "独自アプリ" : a.ApplicationName;
+                string val = a?.IsSensitive == true ? "[REDACTED] (機密保護)" : (a?.Value ?? string.Empty);
+                return ($"独自アプリ ({appName})", $"要素: {key} ({strategy})", $"入力値: 「{val}」");
+            }
+            case IrConstants.ActionCustomAppReadText:
+            {
+                var a = args.Deserialize<CustomAppReadTextArgs>();
+                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                string appName = string.IsNullOrWhiteSpace(a?.ApplicationName) ? "独自アプリ" : a.ApplicationName;
+                return ($"独自アプリ ({appName})", $"要素: {key} ({strategy})", "テキスト読み取り");
+            }
+            default:
+                return ("アプリ", node.ActionType ?? "操作", "-");
         }
     }
 

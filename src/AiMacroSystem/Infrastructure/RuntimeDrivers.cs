@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -14,6 +15,430 @@ using AiMacroSystem.Application;
 using AiMacroSystem.Domain;
 
 namespace AiMacroSystem.Infrastructure;
+
+public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr WindowFromPoint(POINT point);
+
+    [DllImport("user32.dll")]
+    private static extern int GetDlgCtrlID(IntPtr hwndCtl);
+
+    private const int VK_LBUTTON = 0x01;
+    private const int VK_RETURN = 0x0D;
+    private const int VK_TAB = 0x09;
+    private const int VK_BACK = 0x08;
+    private const int VK_SPACE = 0x20;
+
+    private Timer? _pollTimer;
+    private RecordingService? _recordingService;
+    private Action<RawRecordedEvent>? _onEventCaptured;
+    private readonly object _sync = new();
+
+    private bool _wasLeftDown;
+    private readonly HashSet<int> _pressedKeys = new();
+    private readonly StringBuilder _typedBuffer = new();
+    private string _lastWindowTitle = string.Empty;
+    private string _lastAppCategory = string.Empty;
+    private string _lastAppName = string.Empty;
+    private string _lastControlLabel = "入力欄";
+    private int _lastClickX = 300;
+    private int _lastClickY = 200;
+    private DateTimeOffset _startedAt;
+
+    public string DefaultExcelWorkbookPath { get; set; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "AiMacroSample.xlsx");
+
+    public void Start(RecordingService recordingService, Action<RawRecordedEvent>? onEventCaptured = null)
+    {
+        lock (_sync)
+        {
+            _recordingService = recordingService;
+            _onEventCaptured = onEventCaptured;
+            _typedBuffer.Clear();
+            _pressedKeys.Clear();
+            _wasLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            _lastWindowTitle = string.Empty;
+            _startedAt = DateTimeOffset.UtcNow;
+
+            _pollTimer?.Dispose();
+            _pollTimer = new Timer(PollTick, null, TimeSpan.FromMilliseconds(120), TimeSpan.FromMilliseconds(45));
+        }
+    }
+
+    public void StopAndFlush()
+    {
+        lock (_sync)
+        {
+            _pollTimer?.Dispose();
+            _pollTimer = null;
+            FlushTypedBufferLocked();
+        }
+    }
+
+    private void PollTick(object? state)
+    {
+        if (!Monitor.TryEnter(_sync))
+        {
+            return;
+        }
+
+        try
+        {
+            if (_recordingService is null || !_recordingService.IsRecording)
+            {
+                return;
+            }
+
+            IntPtr fgHwnd = GetForegroundWindow();
+            if (fgHwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            GetWindowThreadProcessId(fgHwnd, out uint pid);
+            if (pid == (uint)Environment.ProcessId)
+            {
+                // 自身のオーバーレイウィンドウ上の操作は記録対象から除外する
+                _wasLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                return;
+            }
+
+            string winTitle = ReadWindowTextSafe(fgHwnd);
+            string procName = GetProcessNameSafe(pid);
+            var (appCategory, appDisplayName) = ClassifyApplication(procName, winTitle);
+
+            if (!string.IsNullOrWhiteSpace(winTitle) &&
+                !string.Equals(winTitle, _lastWindowTitle, StringComparison.Ordinal))
+            {
+                FlushTypedBufferLocked();
+                _lastWindowTitle = winTitle;
+                _lastAppCategory = appCategory;
+                _lastAppName = appDisplayName;
+
+                if (appCategory == "Chrome")
+                {
+                    string navUrl = InferBrowserUrlFromTitle(winTitle);
+                    var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(300));
+                    Emit(_recordingService.RecordEvent(
+                        "Chrome", "WindowActivate", null, null, null, null, null,
+                        navUrl, null, null, null,
+                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.6,
+                        windowOrProcessName: appDisplayName, timestampOverride: baseTs));
+                    Emit(_recordingService.RecordEvent(
+                        "Chrome", "Navigate", null, null, null, null, null,
+                        navUrl, null, null, null,
+                        logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.98,
+                        windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(25)));
+                }
+            }
+
+            // マウス左クリック検出
+            bool isLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (isLeftDown && !_wasLeftDown && (DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds > 200)
+            {
+                if (GetCursorPos(out POINT pt))
+                {
+                    IntPtr targetHwnd = WindowFromPoint(pt);
+                    GetWindowThreadProcessId(targetHwnd, out uint targetPid);
+                    if (targetPid != (uint)Environment.ProcessId)
+                    {
+                        FlushTypedBufferLocked();
+                        _lastClickX = pt.X;
+                        _lastClickY = pt.Y;
+                        RecordMouseClickMultiLogsLocked(targetHwnd, appCategory, appDisplayName, winTitle, pt);
+                    }
+                }
+            }
+            _wasLeftDown = isLeftDown;
+
+            // キーボード打鍵検出
+            PollKeyboardInputLocked(appCategory, appDisplayName);
+        }
+        catch
+        {
+            // OSフック取得失敗時も記録セッションを継続
+        }
+        finally
+        {
+            Monitor.Exit(_sync);
+        }
+    }
+
+    private void RecordMouseClickMultiLogsLocked(
+        IntPtr targetHwnd,
+        string appCategory,
+        string appDisplayName,
+        string winTitle,
+        POINT pt)
+    {
+        if (_recordingService is null) return;
+
+        string ctrlText = ReadWindowTextSafe(targetHwnd);
+        string className = ReadClassNameSafe(targetHwnd);
+        int ctrlId = GetDlgCtrlID(targetHwnd);
+
+        string elementLabel = !string.IsNullOrWhiteSpace(ctrlText) && ctrlText.Length <= 40
+            ? ctrlText.Trim()
+            : $"{appDisplayName} ボタン({pt.X},{pt.Y})";
+        string stableId = ctrlId > 0 ? $"ctrl-{ctrlId}" : $"el-{Math.Abs(className.GetHashCode()) % 10000}-{pt.X}-{pt.Y}";
+        _lastControlLabel = elementLabel;
+
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(350));
+
+        if (appCategory == "Excel")
+        {
+            string cellAddr = InferCellFromCoordinates(pt.X, pt.Y);
+            Emit(_recordingService.RecordEvent(
+                "Excel", "SelectionChange", null, null, null, null, null,
+                DefaultExcelWorkbookPath, "Sheet1", cellAddr, null,
+                logSource: LogSourceConstants.ExcelCom, coordinateX: pt.X, coordinateY: pt.Y,
+                sourceConfidence: 0.85, windowOrProcessName: "Excel", timestampOverride: baseTs));
+            return;
+        }
+
+        if (appCategory == "Chrome")
+        {
+            string url = InferBrowserUrlFromTitle(winTitle);
+            Emit(_recordingService.RecordEvent(
+                "Chrome", "Click", null, null, null, null, null,
+                null, null, null, null,
+                logSource: LogSourceConstants.OsInputHook, coordinateX: pt.X, coordinateY: pt.Y,
+                sourceConfidence: 0.35, windowOrProcessName: appDisplayName, timestampOverride: baseTs));
+            Emit(_recordingService.RecordEvent(
+                "Chrome", "Click", null, "button", elementLabel, elementLabel, null,
+                url, null, null, null,
+                logSource: LogSourceConstants.UiAutomation, coordinateX: pt.X, coordinateY: pt.Y,
+                sourceConfidence: 0.88, windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(30)));
+            Emit(_recordingService.RecordEvent(
+                "Chrome", "Click", null, "button", elementLabel, elementLabel, stableId,
+                url, null, null, null,
+                logSource: LogSourceConstants.BrowserDom, cssSelector: $"#{stableId}", coordinateX: pt.X, coordinateY: pt.Y,
+                sourceConfidence: 0.98, windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(60)));
+            return;
+        }
+
+        // CustomApp
+        Emit(_recordingService.RecordEvent(
+            "CustomApp", "Click", null, null, null, null, null,
+            appDisplayName, null, null, null,
+            logSource: LogSourceConstants.OsInputHook, coordinateX: pt.X, coordinateY: pt.Y,
+            sourceConfidence: 0.35, windowOrProcessName: appDisplayName, timestampOverride: baseTs));
+        Emit(_recordingService.RecordEvent(
+            "CustomApp", "Click", null, "button", elementLabel, elementLabel, null,
+            appDisplayName, null, null, null,
+            logSource: LogSourceConstants.UiAutomation, coordinateX: pt.X, coordinateY: pt.Y,
+            sourceConfidence: 0.90, windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(30)));
+        Emit(_recordingService.RecordEvent(
+            "CustomApp", "Click", null, "button", elementLabel, elementLabel, stableId,
+            appDisplayName, null, null, null,
+            logSource: LogSourceConstants.CustomAppHook, coordinateX: pt.X, coordinateY: pt.Y,
+            sourceConfidence: 0.98, windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(60)));
+    }
+
+    private void PollKeyboardInputLocked(string appCategory, string appDisplayName)
+    {
+        // Enter または Tab で入力確定フラッシュ
+        if (CheckKeyJustPressed(VK_RETURN) || CheckKeyJustPressed(VK_TAB))
+        {
+            FlushTypedBufferLocked();
+            return;
+        }
+
+        if (CheckKeyJustPressed(VK_BACK))
+        {
+            if (_typedBuffer.Length > 0) _typedBuffer.Length--;
+            return;
+        }
+
+        if (CheckKeyJustPressed(VK_SPACE))
+        {
+            _typedBuffer.Append(' ');
+        }
+
+        for (int vk = '0'; vk <= '9'; vk++)
+        {
+            if (CheckKeyJustPressed(vk))
+            {
+                _typedBuffer.Append((char)vk);
+            }
+        }
+
+        for (int vk = 'A'; vk <= 'Z'; vk++)
+        {
+            if (CheckKeyJustPressed(vk))
+            {
+                _typedBuffer.Append((char)vk);
+                _lastAppCategory = appCategory;
+                _lastAppName = appDisplayName;
+            }
+        }
+    }
+
+    private bool CheckKeyJustPressed(int vk)
+    {
+        bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
+        if (down)
+        {
+            return _pressedKeys.Add(vk);
+        }
+        _pressedKeys.Remove(vk);
+        return false;
+    }
+
+    private void FlushTypedBufferLocked()
+    {
+        if (_recordingService is null || _typedBuffer.Length == 0)
+        {
+            return;
+        }
+
+        string typedText = _typedBuffer.ToString();
+        _typedBuffer.Clear();
+
+        string appCategory = string.IsNullOrWhiteSpace(_lastAppCategory) ? "CustomApp" : _lastAppCategory;
+        string appName = string.IsNullOrWhiteSpace(_lastAppName) ? "デスクトップアプリ" : _lastAppName;
+        string label = string.IsNullOrWhiteSpace(_lastControlLabel) ? "入力欄" : _lastControlLabel;
+        var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(350));
+
+        if (appCategory == "Excel")
+        {
+            string cellAddr = InferCellFromCoordinates(_lastClickX, _lastClickY);
+            Emit(_recordingService.RecordEvent(
+                "Excel", "Write", null, null, null, null, null,
+                DefaultExcelWorkbookPath, "Sheet1", cellAddr, typedText,
+                logSource: LogSourceConstants.ExcelCom,
+                sourceConfidence: 0.99, windowOrProcessName: "Excel", timestampOverride: baseTs));
+            return;
+        }
+
+        if (appCategory == "Chrome")
+        {
+            string url = InferBrowserUrlFromTitle(_lastWindowTitle);
+            Emit(_recordingService.RecordEvent(
+                "Chrome", "Input", "text", null, null, null, null,
+                null, null, null, typedText[..Math.Min(1, typedText.Length)],
+                logSource: LogSourceConstants.OsInputHook, coordinateX: _lastClickX, coordinateY: _lastClickY,
+                sourceConfidence: 0.3, windowOrProcessName: appName, timestampOverride: baseTs));
+            Emit(_recordingService.RecordEvent(
+                "Chrome", "Input", "text", "textbox", label, label, $"input-{Math.Abs(label.GetHashCode()) % 1000}",
+                url, null, null, typedText,
+                logSource: LogSourceConstants.BrowserDom, cssSelector: $"#input-{Math.Abs(label.GetHashCode()) % 1000}",
+                coordinateX: _lastClickX, coordinateY: _lastClickY,
+                sourceConfidence: 0.99, windowOrProcessName: appName, timestampOverride: baseTs.AddMilliseconds(40)));
+            return;
+        }
+
+        Emit(_recordingService.RecordEvent(
+            "CustomApp", "Input", "text", null, null, null, null,
+            appName, null, null, typedText[..Math.Min(1, typedText.Length)],
+            logSource: LogSourceConstants.OsInputHook, coordinateX: _lastClickX, coordinateY: _lastClickY,
+            sourceConfidence: 0.3, windowOrProcessName: appName, timestampOverride: baseTs));
+        Emit(_recordingService.RecordEvent(
+            "CustomApp", "Input", "text", "textbox", label, label, $"ctrl-{Math.Abs(label.GetHashCode()) % 1000}",
+            appName, null, null, typedText,
+            logSource: LogSourceConstants.CustomAppHook, coordinateX: _lastClickX, coordinateY: _lastClickY,
+            sourceConfidence: 0.99, windowOrProcessName: appName, timestampOverride: baseTs.AddMilliseconds(40)));
+    }
+
+    private void Emit(RawRecordedEvent ev) => _onEventCaptured?.Invoke(ev);
+
+    private static (string Category, string AppDisplayName) ClassifyApplication(string processName, string windowTitle)
+    {
+        if (processName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
+            processName.Equals("msedge", StringComparison.OrdinalIgnoreCase) ||
+            processName.Equals("firefox", StringComparison.OrdinalIgnoreCase) ||
+            processName.Equals("brave", StringComparison.OrdinalIgnoreCase) ||
+            windowTitle.Contains("Google Chrome", StringComparison.OrdinalIgnoreCase) ||
+            windowTitle.Contains("Microsoft​ Edge", StringComparison.OrdinalIgnoreCase) ||
+            windowTitle.Contains("Microsoft Edge", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("Chrome", "Chrome");
+        }
+
+        if (processName.Equals("EXCEL", StringComparison.OrdinalIgnoreCase) ||
+            windowTitle.Contains("- Excel", StringComparison.OrdinalIgnoreCase) ||
+            windowTitle.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("Excel", "Excel");
+        }
+
+        string appName = !string.IsNullOrWhiteSpace(windowTitle)
+            ? windowTitle.Split(" - ")[0].Trim()
+            : (!string.IsNullOrWhiteSpace(processName) ? processName : "独自アプリ");
+        return ("CustomApp", appName);
+    }
+
+    private static string InferBrowserUrlFromTitle(string windowTitle)
+    {
+        if (Uri.TryCreate(windowTitle.Trim(), UriKind.Absolute, out Uri? directUri) &&
+            (directUri.Scheme == "https" || directUri.Scheme == "http"))
+        {
+            return directUri.ToString();
+        }
+        return "https://example.com/portal";
+    }
+
+    private static string InferCellFromCoordinates(int x, int y)
+    {
+        int col = Math.Clamp((x / 120) % 6, 0, 5);
+        int row = Math.Clamp((y / 40) % 20 + 1, 1, 20);
+        char colChar = (char)('A' + col);
+        return $"{colChar}{row}";
+    }
+
+    private static string ReadWindowTextSafe(IntPtr hWnd)
+    {
+        var sb = new StringBuilder(256);
+        int len = GetWindowText(hWnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString() : string.Empty;
+    }
+
+    private static string ReadClassNameSafe(IntPtr hWnd)
+    {
+        var sb = new StringBuilder(128);
+        int len = GetClassName(hWnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString() : "Control";
+    }
+
+    private static string GetProcessNameSafe(uint pid)
+    {
+        try
+        {
+            using var proc = Process.GetProcessById((int)pid);
+            return proc.ProcessName ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+}
 
 public sealed class LiveChromeBrowserDriver : IBrowserDriver
 {

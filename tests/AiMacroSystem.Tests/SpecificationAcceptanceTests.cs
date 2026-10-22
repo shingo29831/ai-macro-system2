@@ -873,7 +873,23 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         Assert.Empty(vm.CurrentValidationIssues);
         Assert.Equal(4, vm.EasySteps.Count);
 
-        // 作成済みマクロに対するブロック編集（独自アプリクリックブロックの追加・上下移動・削除）
+        // 各ビジュアルブロックに操作対象アプリ・ロケーション・操作値・統合元ログ情報がマクロ化されていることを検証
+        Assert.Contains("Chrome", vm.EasySteps[1].TargetAppBadge);
+        Assert.Contains("顧客コード", vm.EasySteps[1].TargetLocationSummary);
+        Assert.Contains("ABC-999", vm.EasySteps[1].OperationValueSummary);
+        Assert.Contains("BrowserDom", vm.EasySteps[1].SourceLogSummary);
+
+        Assert.Contains("社内受注管理システム", vm.EasySteps[3].TargetAppBadge);
+        Assert.Contains("ABC-999", vm.EasySteps[3].OperationValueSummary);
+
+        // 作成済みマクロの既存ビジュアルブロックを選択して操作内容を編集できることを検証
+        vm.SelectStepForEditing(vm.EasySteps[1]);
+        Assert.Equal(vm.EasySteps[1], vm.SelectedStepForEdit);
+        vm.StepFillValueInput = "ABC-1000-EDITED";
+        vm.UpdateSelectedStepFromBuilderUi();
+        Assert.Contains("ABC-1000-EDITED", vm.EasySteps[1].OperationValueSummary);
+
+        // 作成済みマクロに対するブロック追加・上下移動
         vm.SelectedActionKind = IrConstants.ActionCustomAppClick;
         vm.StepCustomAppNameInput = "社内受注管理システム";
         vm.StepElementNameInput = "登録確定";

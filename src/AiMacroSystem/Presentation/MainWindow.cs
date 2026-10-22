@@ -30,6 +30,7 @@ public sealed class MainWindow : Window
     private readonly StackPanel _visualBlockChainPanel;
 
     private StackPanel _fieldUrlPanel = null!;
+    private StackPanel _fieldCustomAppPanel = null!;
     private StackPanel _fieldElementPanel = null!;
     private StackPanel _fieldValuePanel = null!;
     private CheckBox _fieldPasswordCheck = null!;
@@ -86,6 +87,14 @@ public sealed class MainWindow : Window
         Content = root;
 
         ((INotifyCollectionChanged)_vm.EasySteps).CollectionChanged += (_, _) => RebuildVisualBlockChain();
+        _vm.VisualBlocksUpdated += () =>
+        {
+            RebuildVisualBlockChain();
+            if (_vm.IsEditingMode)
+            {
+                _mainTabs.SelectedIndex = 2;
+            }
+        };
         _vm.PropertyChanged += OnViewModelPropertyChanged;
 
         Closed += (_, _) => _overlayWindow.Close();
@@ -481,11 +490,19 @@ public sealed class MainWindow : Window
         Grid.SetColumn(flowCard, 0);
         contentGrid.Children.Add(flowCard);
 
-        // 中央：アクション追加フォーム
+        // 中央：ブロック選択編集＆追加フォーム
         var addCard = CreateCard();
         var formScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
         var formStack = new StackPanel();
-        formStack.Children.Add(new TextBlock { Text = "登録済みアクション追加", FontSize = 14, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 10) });
+        var editHeaderBlock = new TextBlock
+        {
+            FontSize = 13.5,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 0, 0, 10),
+            TextWrapping = TextWrapping.Wrap
+        };
+        editHeaderBlock.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.EditingBlockHeaderText)));
+        formStack.Children.Add(editHeaderBlock);
 
         formStack.Children.Add(CreateFieldLabel("アクション種別"));
         var actionCombo = new ComboBox
@@ -503,6 +520,7 @@ public sealed class MainWindow : Window
         };
         formStack.Children.Add(actionCombo);
 
+        _fieldCustomAppPanel = CreateLabeledInput("独自アプリ名 / ウィンドウ識別名", nameof(MainViewModel.StepCustomAppNameInput));
         _fieldUrlPanel = CreateLabeledInput("URL (オリジン許可リスト対象)", nameof(MainViewModel.StepUrlInput));
         _fieldElementPanel = CreateLabeledInput("意味的ロケーター (ラベル/アクセシブル名)", nameof(MainViewModel.StepElementNameInput));
         _fieldValuePanel = CreateLabeledInput("入力値", nameof(MainViewModel.StepFillValueInput));
@@ -532,6 +550,7 @@ public sealed class MainWindow : Window
 
         _fieldExcelWritePanel = CreateLabeledInput("2次元書き込みデータ (CSV形式)", nameof(MainViewModel.StepExcelWriteTextInput));
 
+        formStack.Children.Add(_fieldCustomAppPanel);
         formStack.Children.Add(_fieldUrlPanel);
         formStack.Children.Add(_fieldElementPanel);
         formStack.Children.Add(_fieldValuePanel);
@@ -540,7 +559,12 @@ public sealed class MainWindow : Window
         formStack.Children.Add(_fieldExcelMetaGrid);
         formStack.Children.Add(_fieldExcelWritePanel);
 
-        var addBtn = CreateButton("＋ ブロックを追加", _accentPrimary, Colors.White, isCompact: false);
+        var updateBtn = CreateButton("💾 選択中のブロックを更新", _accentSuccess, Colors.White, isCompact: false);
+        updateBtn.Margin = new Thickness(0, 0, 0, 8);
+        updateBtn.Click += (_, _) => _vm.UpdateSelectedStepFromBuilderUi();
+        formStack.Children.Add(updateBtn);
+
+        var addBtn = CreateButton("＋ 新しいブロックとして末尾に追加", _accentPrimary, Colors.White, isCompact: false);
         addBtn.Click += (_, _) => _vm.AddStepFromBuilderUi();
         formStack.Children.Add(addBtn);
 
@@ -953,13 +977,17 @@ public sealed class MainWindow : Window
 
         var blockBorder = new Border
         {
-            Background = Brushes.White,
+            Background = step.IsSelectedForEdit
+                ? new SolidColorBrush(Color.FromRgb(239, 246, 255))
+                : Brushes.White,
             BorderBrush = new SolidColorBrush(accentColor),
-            BorderThickness = new Thickness(2),
+            BorderThickness = new Thickness(step.IsSelectedForEdit ? 3 : 2),
             CornerRadius = new CornerRadius(10),
             Padding = new Thickness(12, 10, 12, 10),
-            HorizontalAlignment = HorizontalAlignment.Stretch
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Cursor = Cursors.Hand
         };
+        blockBorder.MouseLeftButtonDown += (_, _) => _vm.SelectStepForEditing(step);
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -973,7 +1001,7 @@ public sealed class MainWindow : Window
             Width = 34,
             Height = 34,
             Margin = new Thickness(0, 0, 10, 0),
-            VerticalAlignment = VerticalAlignment.Center
+            VerticalAlignment = VerticalAlignment.Top
         };
         badge.Child = new TextBlock
         {
@@ -988,27 +1016,107 @@ public sealed class MainWindow : Window
         grid.Children.Add(badge);
 
         var infoStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        infoStack.Children.Add(new TextBlock { Text = step.FriendlyTitle, FontWeight = FontWeights.Bold, FontSize = 13 });
-        infoStack.Children.Add(new TextBlock { Text = step.FriendlyDetail, FontSize = 11.5, Foreground = new SolidColorBrush(_textSecondary), TextWrapping = TextWrapping.Wrap });
+
+        var headerWrap = new WrapPanel { Margin = new Thickness(0, 0, 0, 3) };
+        var appPill = new Border
+        {
+            Background = new SolidColorBrush(accentColor),
+            CornerRadius = new CornerRadius(4),
+            Padding = new Thickness(6, 1, 6, 1),
+            Margin = new Thickness(0, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        appPill.Child = new TextBlock
+        {
+            Text = step.TargetAppBadge,
+            Foreground = Brushes.White,
+            FontSize = 10.5,
+            FontWeight = FontWeights.SemiBold
+        };
+        headerWrap.Children.Add(appPill);
+        headerWrap.Children.Add(new TextBlock
+        {
+            Text = step.FriendlyTitle,
+            FontWeight = FontWeights.Bold,
+            FontSize = 13,
+            VerticalAlignment = VerticalAlignment.Center
+        });
+        infoStack.Children.Add(headerWrap);
+
+        if (!string.IsNullOrWhiteSpace(step.TargetLocationSummary))
+        {
+            infoStack.Children.Add(new TextBlock
+            {
+                Text = $"🎯 {step.TargetLocationSummary}",
+                FontSize = 11.5,
+                Foreground = new SolidColorBrush(_textPrimary),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 1, 0, 1)
+            });
+        }
+
+        if (!string.IsNullOrWhiteSpace(step.OperationValueSummary))
+        {
+            infoStack.Children.Add(new TextBlock
+            {
+                Text = $"⚡ {step.OperationValueSummary}",
+                FontSize = 11.5,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = new SolidColorBrush(accentColor),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 1, 0, 1)
+            });
+        }
+
+        infoStack.Children.Add(new TextBlock
+        {
+            Text = $"📋 {step.SourceLogSummary}",
+            FontSize = 10.5,
+            Foreground = new SolidColorBrush(_textSecondary),
+            TextWrapping = TextWrapping.Wrap
+        });
+
         Grid.SetColumn(infoStack, 1);
         grid.Children.Add(infoStack);
 
-        var ctrlStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0) };
+        var ctrlStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(6, 0, 0, 0) };
+        var editBtn = CreateButton("✏", _accentNeutral, _textPrimary, isCompact: true);
+        editBtn.Padding = new Thickness(6, 2, 6, 2);
+        editBtn.Margin = new Thickness(0, 0, 3, 0);
+        editBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            _vm.SelectStepForEditing(step);
+        };
+        ctrlStack.Children.Add(editBtn);
+
         var upBtn = CreateButton("↑", _accentNeutral, _textSecondary, isCompact: true);
         upBtn.Padding = new Thickness(6, 2, 6, 2);
         upBtn.Margin = new Thickness(0, 0, 3, 0);
-        upBtn.Click += (_, _) => _vm.MoveStepUp(step);
+        upBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            _vm.MoveStepUp(step);
+        };
         ctrlStack.Children.Add(upBtn);
 
         var downBtn = CreateButton("↓", _accentNeutral, _textSecondary, isCompact: true);
         downBtn.Padding = new Thickness(6, 2, 6, 2);
         downBtn.Margin = new Thickness(0, 0, 3, 0);
-        downBtn.Click += (_, _) => _vm.MoveStepDown(step);
+        downBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            _vm.MoveStepDown(step);
+        };
         ctrlStack.Children.Add(downBtn);
 
         var delBtn = CreateButton("✕", Color.FromRgb(254, 226, 226), Color.FromRgb(185, 28, 28), isCompact: true);
         delBtn.Padding = new Thickness(6, 2, 6, 2);
-        delBtn.Click += (_, _) => _vm.RemoveSpecificStep(step);
+        delBtn.Click += (_, e) =>
+        {
+            e.Handled = true;
+            _vm.RemoveSpecificStep(step);
+        };
         ctrlStack.Children.Add(delBtn);
 
         Grid.SetColumn(ctrlStack, 2);
@@ -1047,6 +1155,7 @@ public sealed class MainWindow : Window
         bool isCustomFill = actionKind == IrConstants.ActionCustomAppFill;
         bool isCustomRead = actionKind == IrConstants.ActionCustomAppReadText;
 
+        _fieldCustomAppPanel.Visibility = (isCustomClick || isCustomFill || isCustomRead) ? Visibility.Visible : Visibility.Collapsed;
         _fieldUrlPanel.Visibility = (isNav || isSubmit) ? Visibility.Visible : Visibility.Collapsed;
         _fieldElementPanel.Visibility = (isFill || isClick || isSubmit || isCustomClick || isCustomFill || isCustomRead) ? Visibility.Visible : Visibility.Collapsed;
         _fieldValuePanel.Visibility = (isFill || isCustomFill) ? Visibility.Visible : Visibility.Collapsed;
