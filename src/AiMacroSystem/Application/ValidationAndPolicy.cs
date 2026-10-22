@@ -90,6 +90,42 @@ public static class ActionCatalog
             MaxRetries = 0,
             RetryableClassifications = new HashSet<FailureClassification>(),
             RequiresPostconditionVerification = true
+        },
+        [IrConstants.ActionCustomAppClick] = new ActionContract
+        {
+            ActionType = IrConstants.ActionCustomAppClick,
+            DeclaredSideEffects = SideEffectKind.LocalMutation,
+            BaseRiskLevel = RiskLevel.Medium,
+            OutputTypes = new Dictionary<string, string> { ["clicked"] = IrConstants.TypeBoolean },
+            Timeout = TimeSpan.FromSeconds(15),
+            AllowRetry = false,
+            MaxRetries = 0,
+            RetryableClassifications = new HashSet<FailureClassification>(),
+            RequiresPostconditionVerification = true
+        },
+        [IrConstants.ActionCustomAppFill] = new ActionContract
+        {
+            ActionType = IrConstants.ActionCustomAppFill,
+            DeclaredSideEffects = SideEffectKind.LocalMutation,
+            BaseRiskLevel = RiskLevel.Low,
+            OutputTypes = new Dictionary<string, string> { ["filledValue"] = IrConstants.TypeString },
+            Timeout = TimeSpan.FromSeconds(15),
+            AllowRetry = true,
+            MaxRetries = 1,
+            RetryableClassifications = new HashSet<FailureClassification> { FailureClassification.TransientError },
+            RequiresPostconditionVerification = true
+        },
+        [IrConstants.ActionCustomAppReadText] = new ActionContract
+        {
+            ActionType = IrConstants.ActionCustomAppReadText,
+            DeclaredSideEffects = SideEffectKind.Read,
+            BaseRiskLevel = RiskLevel.Low,
+            OutputTypes = new Dictionary<string, string> { ["text"] = IrConstants.TypeString },
+            Timeout = TimeSpan.FromSeconds(15),
+            AllowRetry = true,
+            MaxRetries = 2,
+            RetryableClassifications = new HashSet<FailureClassification> { FailureClassification.TransientError },
+            RequiresPostconditionVerification = true
         }
     };
 
@@ -762,6 +798,60 @@ public sealed class IrValidator
                 }
                 break;
             }
+            case IrConstants.ActionCustomAppClick:
+            {
+                if (!TryDeserializeArgs<CustomAppClickArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
+                if (args is null || string.IsNullOrWhiteSpace(args.ApplicationName))
+                {
+                    result.AddIssue(ValidationStage.TargetAndAllowedScope, "CUSTOM_APP_NAME_MISSING", "CustomApp.Click requires an explicit applicationName.", node.NodeId);
+                }
+                ValidateLocator(args?.Locator, policy, node.NodeId, result);
+                break;
+            }
+            case IrConstants.ActionCustomAppFill:
+            {
+                if (!TryDeserializeArgs<CustomAppFillArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
+                if (args is null || string.IsNullOrWhiteSpace(args.ApplicationName))
+                {
+                    result.AddIssue(ValidationStage.TargetAndAllowedScope, "CUSTOM_APP_NAME_MISSING", "CustomApp.Fill requires an explicit applicationName.", node.NodeId);
+                }
+                ValidateLocator(args?.Locator, policy, node.NodeId, result);
+                if (args is null || (string.IsNullOrEmpty(args.Value) && args.ValueRef is null))
+                {
+                    result.AddIssue(ValidationStage.ArgumentTypesAndRanges, "CUSTOM_APP_FILL_VALUE_MISSING", "CustomApp.Fill requires either value or valueRef.", node.NodeId);
+                }
+                if (args?.ValueRef is not null)
+                {
+                    ValidateDataReference(args.ValueRef, visibleOutputs, node.NodeId, result);
+                    if (args.ValueRef.ExpectedType != IrConstants.TypeString)
+                    {
+                        result.AddIssue(ValidationStage.DataReferencesAndScope, "CUSTOM_APP_FILL_REF_TYPE", "CustomApp.Fill valueRef must be of type String.", node.NodeId);
+                    }
+                }
+                break;
+            }
+            case IrConstants.ActionCustomAppReadText:
+            {
+                if (!TryDeserializeArgs<CustomAppReadTextArgs>(argsElement, node.NodeId, result, out var args))
+                {
+                    argsDeserialized = false;
+                    break;
+                }
+                if (args is null || string.IsNullOrWhiteSpace(args.ApplicationName))
+                {
+                    result.AddIssue(ValidationStage.TargetAndAllowedScope, "CUSTOM_APP_NAME_MISSING", "CustomApp.ReadText requires an explicit applicationName.", node.NodeId);
+                }
+                ValidateLocator(args?.Locator, policy, node.NodeId, result);
+                break;
+            }
         }
 
         if (argsDeserialized)
@@ -1203,6 +1293,45 @@ public sealed class PolicyEngine
                 {
                     risk = RiskLevel.High;
                 }
+                break;
+            }
+            case IrConstants.ActionCustomAppClick:
+            {
+                var args = argsElement.Deserialize<CustomAppClickArgs>()!;
+                string ctrl = args.Locator?.AccessibleName ?? args.Locator?.Label ?? args.Locator?.StableId ?? "Control";
+                targetSummary = $"{args.ApplicationName} [{ctrl}]";
+                inputSummary = args.IsDestructive ? "Destructive Click" : "Click";
+                if (args.IsDestructive)
+                {
+                    sideEffects |= SideEffectKind.Destructive;
+                    risk = RiskLevel.Prohibited;
+                }
+                else if (args.Locator?.UsesCoordinatesOnly() == true)
+                {
+                    risk = RiskLevel.High;
+                }
+                break;
+            }
+            case IrConstants.ActionCustomAppFill:
+            {
+                var args = argsElement.Deserialize<CustomAppFillArgs>()!;
+                string ctrl = args.Locator?.Label ?? args.Locator?.AccessibleName ?? args.Locator?.StableId ?? "Input";
+                targetSummary = $"{args.ApplicationName} [{ctrl}]";
+                inputSummary = args.IsSensitive
+                    ? SensitiveDataProtector.RedactedPlaceholder
+                    : (args.ValueRef is not null ? $"Ref:{args.ValueRef.SourceNodeId}.{args.ValueRef.OutputName}" : (args.Value ?? string.Empty));
+                if (args.IsSensitive)
+                {
+                    risk = RiskLevel.High;
+                }
+                break;
+            }
+            case IrConstants.ActionCustomAppReadText:
+            {
+                var args = argsElement.Deserialize<CustomAppReadTextArgs>()!;
+                string ctrl = args.Locator?.Label ?? args.Locator?.AccessibleName ?? args.Locator?.StableId ?? "Control";
+                targetSummary = $"{args.ApplicationName} [{ctrl}]";
+                inputSummary = $"ReadText {ctrl}";
                 break;
             }
         }

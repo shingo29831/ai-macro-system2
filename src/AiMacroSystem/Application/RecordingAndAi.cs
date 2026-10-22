@@ -61,7 +61,13 @@ public sealed record RawRecordedEvent(
     string? RangeAddress,
     string? CapturedValue,
     bool IsSensitive,
-    DateTimeOffset Timestamp);
+    DateTimeOffset Timestamp,
+    string LogSource = LogSourceConstants.PrimaryHook,
+    string? CssSelector = null,
+    int? CoordinateX = null,
+    int? CoordinateY = null,
+    double SourceConfidence = 0.85,
+    string? WindowOrProcessName = null);
 
 public sealed record NormalizedActionCandidate(
     string CandidateId,
@@ -109,7 +115,14 @@ public sealed class RecordingService
         string? urlOrWorkbookPath,
         string? sheetName,
         string? rangeAddress,
-        string? rawInputValue)
+        string? rawInputValue,
+        string logSource = LogSourceConstants.PrimaryHook,
+        string? cssSelector = null,
+        int? coordinateX = null,
+        int? coordinateY = null,
+        double sourceConfidence = 0.85,
+        string? windowOrProcessName = null,
+        DateTimeOffset? timestampOverride = null)
     {
         bool sensitive = SensitiveDataProtector.IsSensitiveField(fieldType, targetName, targetLabel);
         // パスワードや認証情報は取得段階で生値を破棄し保存しない（仕様6.1 / 15.1）
@@ -132,7 +145,13 @@ public sealed class RecordingService
             RangeAddress: rangeAddress,
             CapturedValue: safeValue,
             IsSensitive: sensitive,
-            Timestamp: DateTimeOffset.UtcNow);
+            Timestamp: timestampOverride ?? DateTimeOffset.UtcNow,
+            LogSource: string.IsNullOrWhiteSpace(logSource) ? LogSourceConstants.PrimaryHook : logSource,
+            CssSelector: cssSelector,
+            CoordinateX: coordinateX,
+            CoordinateY: coordinateY,
+            SourceConfidence: sourceConfidence,
+            WindowOrProcessName: windowOrProcessName);
 
         if (IsRecording)
         {
@@ -142,99 +161,53 @@ public sealed class RecordingService
         return ev;
     }
 
+    public IReadOnlyList<RawRecordedEvent> RecordMultiSourceBatch(IEnumerable<RawRecordedEvent> batchEvents)
+    {
+        var recorded = new List<RawRecordedEvent>();
+        foreach (var raw in batchEvents)
+        {
+            bool sensitive = raw.IsSensitive || SensitiveDataProtector.IsSensitiveField(null, raw.TargetName, raw.TargetLabel);
+            var safeEv = raw with
+            {
+                EventId = string.IsNullOrWhiteSpace(raw.EventId) ? $"evt-{Guid.NewGuid():N}" : raw.EventId,
+                UrlOrWorkbookPath = SensitiveDataProtector.SanitizeText(raw.UrlOrWorkbookPath),
+                CapturedValue = sensitive
+                    ? SensitiveDataProtector.RedactedPlaceholder
+                    : SensitiveDataProtector.SanitizeText(raw.CapturedValue),
+                IsSensitive = sensitive
+            };
+
+            if (IsRecording)
+            {
+                _events.Add(safeEv);
+                _repository?.InsertRawRecordedEvent(safeEv);
+            }
+            recorded.Add(safeEv);
+        }
+        return recorded;
+    }
+
     public IReadOnlyList<RawRecordedEvent> GetRecordedEvents() => _events.AsReadOnly();
 }
 
 public sealed class NormalizationService
 {
     private readonly SqliteRepository? _repository;
+    private readonly MultiLogExtractionEngine _extractionEngine;
 
-    public NormalizationService(SqliteRepository? repository = null)
+    public NormalizationService(SqliteRepository? repository = null, MultiLogExtractionEngine? extractionEngine = null)
     {
         _repository = repository;
+        _extractionEngine = extractionEngine ?? new MultiLogExtractionEngine();
     }
 
     public IReadOnlyList<NormalizedActionCandidate> Normalize(IReadOnlyList<RawRecordedEvent> rawEvents)
     {
-        var candidates = new List<NormalizedActionCandidate>();
-
-        foreach (var ev in rawEvents)
+        var candidates = _extractionEngine.ExtractCandidates(rawEvents);
+        foreach (var candidate in candidates)
         {
-            var locator = new SemanticLocator
-            {
-                Role = ev.TargetRole,
-                AccessibleName = ev.TargetName,
-                Label = ev.TargetLabel,
-                StableId = ev.TargetStableId
-            };
-
-            bool isChrome = string.Equals(ev.ApplicationKind, "Chrome", StringComparison.OrdinalIgnoreCase);
-            bool isAmbiguous = false;
-            string? ambiguityReason = null;
-
-            string actionType;
-            if (isChrome)
-            {
-                if (string.Equals(ev.EventKind, "Navigate", StringComparison.OrdinalIgnoreCase))
-                {
-                    actionType = IrConstants.ActionChromeNavigate;
-                    if (string.IsNullOrWhiteSpace(ev.UrlOrWorkbookPath))
-                    {
-                        isAmbiguous = true;
-                        ambiguityReason = "Navigation URL is missing.";
-                    }
-                }
-                else if (string.Equals(ev.EventKind, "Input", StringComparison.OrdinalIgnoreCase))
-                {
-                    actionType = IrConstants.ActionChromeFill;
-                    if (!locator.HasSemanticTarget())
-                    {
-                        isAmbiguous = true;
-                        ambiguityReason = "Input target lacks semantic locator.";
-                    }
-                }
-                else
-                {
-                    actionType = IrConstants.ActionChromeClick;
-                    if (!locator.HasSemanticTarget())
-                    {
-                        isAmbiguous = true;
-                        ambiguityReason = "Click target lacks semantic locator.";
-                    }
-                }
-            }
-            else
-            {
-                actionType = string.Equals(ev.EventKind, "Write", StringComparison.OrdinalIgnoreCase)
-                    ? IrConstants.ActionExcelWriteRange
-                    : IrConstants.ActionExcelReadRange;
-
-                if (string.IsNullOrWhiteSpace(ev.UrlOrWorkbookPath) ||
-                    string.IsNullOrWhiteSpace(ev.SheetName) ||
-                    string.IsNullOrWhiteSpace(ev.RangeAddress))
-                {
-                    isAmbiguous = true;
-                    ambiguityReason = "Excel workbook, sheet, or range address is incomplete.";
-                }
-            }
-
-            var candidate = new NormalizedActionCandidate(
-                CandidateId: $"cand-{Guid.NewGuid():N}",
-                SuggestedActionType: actionType,
-                SourceRawEventIds: new[] { ev.EventId },
-                Locator: isChrome ? locator : null,
-                TargetUrlOrWorkbook: ev.UrlOrWorkbookPath,
-                SheetName: ev.SheetName,
-                RangeAddress: ev.RangeAddress,
-                SanitizedValue: ev.CapturedValue,
-                IsSensitive: ev.IsSensitive,
-                IsAmbiguous: isAmbiguous,
-                AmbiguityReason: ambiguityReason);
-
-            candidates.Add(candidate);
             _repository?.InsertNormalizedCandidate(candidate);
         }
-
         return candidates;
     }
 }

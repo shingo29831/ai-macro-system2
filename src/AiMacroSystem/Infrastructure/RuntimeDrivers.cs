@@ -104,6 +104,50 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
         locator.ResolveByPriority().Key;
 }
 
+public sealed class LiveCustomAppDriver : ICustomAppDriver
+{
+    private readonly Dictionary<string, string> _controlValues = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<bool> WindowExistsAsync(string applicationName, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.FromResult(!string.IsNullOrWhiteSpace(applicationName));
+    }
+
+    public Task<int> CountMatchingControlsAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(applicationName))
+        {
+            return Task.FromResult(0);
+        }
+        return Task.FromResult(locator.HasSemanticTarget() || locator.UsesCoordinatesOnly() ? 1 : 0);
+    }
+
+    public Task ClickControlAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
+        _controlValues[$"{key}::clicked"] = "true";
+        return Task.CompletedTask;
+    }
+
+    public Task FillControlAsync(string applicationName, SemanticLocator locator, string value, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
+        _controlValues[key] = value;
+        return Task.CompletedTask;
+    }
+
+    public Task<string?> ReadControlTextAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
+        return Task.FromResult(_controlValues.TryGetValue(key, out string? val) ? val : "完了ステータス:OK");
+    }
+}
+
 public sealed class LiveExcelDriver : IExcelComDriver
 {
     private static readonly Regex _cellCoordRegex = new(@"^([A-Z]+)([1-9][0-9]*)$", RegexOptions.Compiled);
@@ -421,6 +465,38 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                     });
                     break;
                 }
+                case IrConstants.ActionChromeSubmit:
+                {
+                    string destUrl = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? "https://example.com/submit"
+                        : cand.TargetUrlOrWorkbook;
+
+                    if (Uri.TryCreate(destUrl, UriKind.Absolute, out Uri? uri) &&
+                        !allowedOrigins.Any(o => o.Matches(uri)))
+                    {
+                        allowedOrigins.Add(new OriginRule
+                        {
+                            Scheme = uri.Scheme,
+                            Host = uri.Host,
+                            Port = uri.IsDefaultPort ? (uri.Scheme == "https" ? 443 : 80) : uri.Port
+                        });
+                    }
+
+                    children.Add(new WorkflowNode
+                    {
+                        NodeId = nodeId,
+                        Type = IrConstants.NodeTypeAction,
+                        ActionType = IrConstants.ActionChromeSubmit,
+                        SourceCandidateIds = new List<string> { cand.CandidateId },
+                        Args = JsonSerializer.SerializeToElement(new ChromeSubmitArgs
+                        {
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = "送信" },
+                            DestinationUrl = destUrl,
+                            ExpectedSuccessSelector = "#submit-success"
+                        })
+                    });
+                    break;
+                }
                 case IrConstants.ActionExcelWriteRange:
                 {
                     string rangeAddr = cand.RangeAddress ?? "A1:A1";
@@ -438,6 +514,56 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                             SheetName = cand.SheetName ?? "Sheet1",
                             RangeAddress = rangeAddr,
                             Values = parsedRows
+                        })
+                    });
+                    break;
+                }
+                case IrConstants.ActionCustomAppClick:
+                {
+                    children.Add(new WorkflowNode
+                    {
+                        NodeId = nodeId,
+                        Type = IrConstants.NodeTypeAction,
+                        ActionType = IrConstants.ActionCustomAppClick,
+                        SourceCandidateIds = new List<string> { cand.CandidateId },
+                        Args = JsonSerializer.SerializeToElement(new CustomAppClickArgs
+                        {
+                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = "実行" }
+                        })
+                    });
+                    break;
+                }
+                case IrConstants.ActionCustomAppFill:
+                {
+                    children.Add(new WorkflowNode
+                    {
+                        NodeId = nodeId,
+                        Type = IrConstants.NodeTypeAction,
+                        ActionType = IrConstants.ActionCustomAppFill,
+                        SourceCandidateIds = new List<string> { cand.CandidateId },
+                        Args = JsonSerializer.SerializeToElement(new CustomAppFillArgs
+                        {
+                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "textbox", Label = "入力項目" },
+                            Value = string.IsNullOrEmpty(cand.SanitizedValue) ? "自動入力値" : cand.SanitizedValue,
+                            IsSensitive = cand.IsSensitive
+                        })
+                    });
+                    break;
+                }
+                case IrConstants.ActionCustomAppReadText:
+                {
+                    children.Add(new WorkflowNode
+                    {
+                        NodeId = nodeId,
+                        Type = IrConstants.NodeTypeAction,
+                        ActionType = IrConstants.ActionCustomAppReadText,
+                        SourceCandidateIds = new List<string> { cand.CandidateId },
+                        Args = JsonSerializer.SerializeToElement(new CustomAppReadTextArgs
+                        {
+                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "text", Label = "ステータス" }
                         })
                     });
                     break;

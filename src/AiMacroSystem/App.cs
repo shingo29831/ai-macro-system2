@@ -69,10 +69,12 @@ public sealed class App : System.Windows.Application
 
         var liveBrowserDriver = new LiveChromeBrowserDriver();
         var liveExcelDriver = new LiveExcelDriver();
+        var liveCustomAppDriver = new LiveCustomAppDriver();
         var localAiProvider = new LocalBuiltInAiProvider();
 
         var chromeAdapter = new ChromeAdapter(liveBrowserDriver);
         var excelAdapter = new ExcelAdapter(liveExcelDriver);
+        var customAppAdapter = new CustomAppAdapter(liveCustomAppDriver);
 
         var adapters = new Dictionary<string, IActionAdapter>(StringComparer.Ordinal)
         {
@@ -81,7 +83,10 @@ public sealed class App : System.Windows.Application
             [IrConstants.ActionChromeFill] = chromeAdapter,
             [IrConstants.ActionChromeSubmit] = chromeAdapter,
             [IrConstants.ActionExcelReadRange] = excelAdapter,
-            [IrConstants.ActionExcelWriteRange] = excelAdapter
+            [IrConstants.ActionExcelWriteRange] = excelAdapter,
+            [IrConstants.ActionCustomAppClick] = customAppAdapter,
+            [IrConstants.ActionCustomAppFill] = customAppAdapter,
+            [IrConstants.ActionCustomAppReadText] = customAppAdapter
         };
 
         var recoveryService = new RecoveryService(repository, adapters);

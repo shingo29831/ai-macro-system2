@@ -74,6 +74,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _stepExcelSheetInput = "Sheet1";
     private string _stepExcelRangeInput = "A1:B2";
     private string _stepExcelWriteTextInput = "完了,2026-10-20\n確認済,OK";
+    private string _stepCustomAppNameInput = "基幹業務システム";
 
     private string _approverNameInput = "ユーザー本人";
     private bool _approveHighRiskChecked = true;
@@ -168,7 +169,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         new KeyValuePair<string, string>(IrConstants.ActionChromeClick, "👆 ボタンをクリック"),
         new KeyValuePair<string, string>(IrConstants.ActionChromeSubmit, "📤 フォームを送信"),
         new KeyValuePair<string, string>(IrConstants.ActionExcelReadRange, "📖 Excelを読み取る"),
-        new KeyValuePair<string, string>(IrConstants.ActionExcelWriteRange, "📝 Excelに書き込む")
+        new KeyValuePair<string, string>(IrConstants.ActionExcelWriteRange, "📝 Excelに書き込む"),
+        new KeyValuePair<string, string>(IrConstants.ActionCustomAppClick, "🖥 独自アプリのボタンを押す"),
+        new KeyValuePair<string, string>(IrConstants.ActionCustomAppFill, "⌨️ 独自アプリに文字を入力"),
+        new KeyValuePair<string, string>(IrConstants.ActionCustomAppReadText, "🔍 独自アプリの文字を読み取る")
     };
 
     public string StatusBanner
@@ -260,6 +264,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get => _stepExcelWriteTextInput;
         set { _stepExcelWriteTextInput = value; OnPropertyChanged(); }
+    }
+
+    public string StepCustomAppNameInput
+    {
+        get => _stepCustomAppNameInput;
+        set { _stepCustomAppNameInput = value; OnPropertyChanged(); }
     }
 
     public string ApproverNameInput
@@ -364,14 +374,21 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void StartNewMacroInEditor()
     {
+        // 全てのマクロは複数ログの記録から生成し、生成後のマクロをブロックエディタで編集する
         ClearEasySteps();
+        if (_recordingService.GetRecordedEvents().Count == 0)
+        {
+            LoadSampleMacro();
+        }
+        else
+        {
+            GenerateMacroFromRecordingSynchronously();
+        }
         WorkflowIdInput = $"wf-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-        WorkflowNameInput = "新しいマクロ";
-        LoadSampleMacro();
-        WorkflowIdInput = $"wf-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
-        WorkflowNameInput = "新しいマクロ";
+        WorkflowNameInput = "記録から生成したマクロ";
+        RebuildIrJsonFromEasySteps();
         IsEditingMode = true;
-        StatusBanner = "ブロックを追加・並べ替えてマクロを作成してください";
+        StatusBanner = "複数ログの記録からマクロを生成しました。ブロックの追加・並べ替えで編集できます";
     }
 
     public void OpenSelectedMacroInEditor()
@@ -446,56 +463,91 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void LoadSampleMacro()
     {
+        // 全てのマクロは複数ログソースからの操作記録・抽出パイプラインで生成する
         EasySteps.Clear();
-        WorkflowIdInput = $"wf-sample-{DateTimeOffset.UtcNow:HHmmss}";
-        WorkflowNameInput = "Webフォーム入力とExcel集計の自動化マクロ";
+        string sampleId = $"wf-sample-{DateTimeOffset.UtcNow:HHmmss}";
+        string sampleName = "Webフォーム入力とExcel集計の自動化マクロ";
 
-        AddEasyStepInternal(
-            IrConstants.ActionChromeNavigate,
-            url: "https://example.com/portal",
-            elementName: "",
-            fillVal: "",
-            isSens: false,
-            excelPath: StepExcelPathInput,
-            sheet: "Sheet1",
-            range: "A1",
-            excelText: "");
+        var baseTime = DateTimeOffset.UtcNow.AddSeconds(-10);
+        _recordingService.StartRecording();
+        RecordedEvents.Clear();
 
-        AddEasyStepInternal(
-            IrConstants.ActionChromeFill,
-            url: "",
-            elementName: "担当者名",
-            fillVal: "山田 太郎",
-            isSens: false,
-            excelPath: StepExcelPathInput,
-            sheet: "Sheet1",
-            range: "A1",
-            excelText: "");
+        // 1. Webページ遷移（WindowManagerノイズログ + BrowserDom正規ログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "WindowActivate", null, null, null, null,
+            "https://example.com/portal", null, null, null, false, baseTime,
+            LogSourceConstants.WindowManager, null, null, null, 0.5, "Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Navigate", null, null, null, null,
+            "https://example.com/portal", null, null, null, false, baseTime.AddMilliseconds(50),
+            LogSourceConstants.BrowserDom, null, null, null, 0.98, "Google Chrome"));
 
-        AddEasyStepInternal(
-            IrConstants.ActionChromeClick,
-            url: "",
-            elementName: "照会する",
-            fillVal: "",
-            isSens: false,
-            excelPath: StepExcelPathInput,
-            sheet: "Sheet1",
-            range: "A1",
-            excelText: "");
+        // 2. 担当者名入力（OsInputHookの途中打鍵ログ + UiAutomationログ + BrowserDom確定ログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", null, null, null, null,
+            null, null, null, "山田", false, baseTime.AddSeconds(1),
+            LogSourceConstants.OsInputHook, null, 320, 240, 0.3, "Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", "textbox", "担当者名", null, null,
+            null, null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(200),
+            LogSourceConstants.UiAutomation, null, 320, 240, 0.88, "Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", "textbox", "担当者名", "担当者名", "input-staff-name",
+            "https://example.com/portal", null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(250),
+            LogSourceConstants.BrowserDom, "#input-staff-name", 320, 240, 0.99, "Google Chrome"));
 
-        AddEasyStepInternal(
-            IrConstants.ActionExcelWriteRange,
-            url: "",
-            elementName: "",
-            fillVal: "",
-            isSens: false,
-            excelPath: StepExcelPathInput,
-            sheet: "Sheet1",
-            range: "A1:B2",
-            excelText: "担当者,結果\n山田 太郎,正常完了");
+        // 3. 照会ボタンクリック（OsInputHook座標ログ + BrowserDomセマンティックログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Click", null, null, null, null,
+            null, null, null, null, false, baseTime.AddSeconds(3),
+            LogSourceConstants.OsInputHook, null, 450, 310, 0.25, "Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Chrome", "Click", "button", "照会する", "照会する", "btn-inquiry",
+            "https://example.com/portal", null, null, null, false, baseTime.AddSeconds(3).AddMilliseconds(40),
+            LogSourceConstants.BrowserDom, "#btn-inquiry", 450, 310, 0.99, "Google Chrome"));
 
+        // 4. Excel書き込み（SelectionChangeノイズログ + ExcelCom書き込み確定ログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Excel", "SelectionChange", null, null, null, null,
+            StepExcelPathInput, "Sheet1", "A1:B2", null, false, baseTime.AddSeconds(5),
+            LogSourceConstants.ExcelCom, null, null, null, 0.7, "Excel"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Excel", "Write", null, null, null, null,
+            StepExcelPathInput, "Sheet1", "A1:B2", "担当者,結果\n山田 太郎,正常完了", false, baseTime.AddSeconds(5).AddMilliseconds(120),
+            LogSourceConstants.ExcelCom, null, null, null, 0.99, "Excel"));
+
+        _recordingService.StopRecording();
+
+        GenerateMacroFromRecordingSynchronously();
+        WorkflowIdInput = sampleId;
+        WorkflowNameInput = sampleName;
         RebuildIrJsonFromEasySteps();
-        StatusBanner = "サンプル手順を読み込みました";
+        StatusBanner = "複数の操作ログから高精度抽出を行いマクロを生成しました";
+    }
+
+    private void RecordAndTrack(RawRecordedEvent ev)
+    {
+        var recorded = _recordingService.RecordMultiSourceBatch(new[] { ev });
+        foreach (var item in recorded)
+        {
+            RecordedEvents.Add(item);
+        }
+    }
+
+    private void GenerateMacroFromRecordingSynchronously()
+    {
+        var rawList = _recordingService.GetRecordedEvents();
+        var candidates = _normalizationService.Normalize(rawList);
+        var policy = new PolicyDeclaration
+        {
+            AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
+            AllowExternalAi = AllowExternalAiPolicy
+        };
+        var localGenerator = new LocalBuiltInAiProvider();
+        string irJson = localGenerator.GenerateWorkflowIrJsonAsync(candidates, policy, null, default).GetAwaiter().GetResult();
+        EditorIrJson = irJson;
+        RebuildEasyStepsFromIrJson(irJson);
+        ValidateCurrentEditorIr();
     }
 
     public void AddStepFromBuilderUi()
@@ -549,6 +601,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string range,
         string excelText)
     {
+        string customAppName = string.IsNullOrWhiteSpace(StepCustomAppNameInput) ? "基幹業務システム" : StepCustomAppNameInput.Trim();
         int num = EasySteps.Count + 1;
         string nodeId = $"step-{num}";
         WorkflowNode node;
@@ -635,6 +688,56 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 };
                 break;
 
+            case IrConstants.ActionCustomAppClick:
+                title = "🖥 独自アプリのボタンを押す";
+                detail = $"アプリ「{customAppName}」 / 対象: 「{elementName}」";
+                node = new WorkflowNode
+                {
+                    NodeId = nodeId,
+                    Type = IrConstants.NodeTypeAction,
+                    ActionType = IrConstants.ActionCustomAppClick,
+                    Args = JsonSerializer.SerializeToElement(new CustomAppClickArgs
+                    {
+                        ApplicationName = customAppName,
+                        Locator = new SemanticLocator { Role = "button", AccessibleName = elementName.Trim(), Label = elementName.Trim() }
+                    })
+                };
+                break;
+
+            case IrConstants.ActionCustomAppFill:
+                title = "⌨️ 独自アプリに文字を入力";
+                detail = $"アプリ「{customAppName}」 / 「{elementName}」へ「{(isSens ? "******** (保護)" : fillVal)}」を入力";
+                node = new WorkflowNode
+                {
+                    NodeId = nodeId,
+                    Type = IrConstants.NodeTypeAction,
+                    ActionType = IrConstants.ActionCustomAppFill,
+                    Args = JsonSerializer.SerializeToElement(new CustomAppFillArgs
+                    {
+                        ApplicationName = customAppName,
+                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = elementName.Trim(), Label = elementName.Trim() },
+                        Value = isSens ? SensitiveDataProtector.RedactedPlaceholder : fillVal,
+                        IsSensitive = isSens
+                    })
+                };
+                break;
+
+            case IrConstants.ActionCustomAppReadText:
+                title = "🔍 独自アプリの文字を読み取る";
+                detail = $"アプリ「{customAppName}」 / 対象: 「{elementName}」";
+                node = new WorkflowNode
+                {
+                    NodeId = nodeId,
+                    Type = IrConstants.NodeTypeAction,
+                    ActionType = IrConstants.ActionCustomAppReadText,
+                    Args = JsonSerializer.SerializeToElement(new CustomAppReadTextArgs
+                    {
+                        ApplicationName = customAppName,
+                        Locator = new SemanticLocator { Role = "text", AccessibleName = elementName.Trim(), Label = elementName.Trim() }
+                    })
+                };
+                break;
+
             default:
                 title = "📝 Excelのセル範囲に書き込む";
                 detail = $"ファイル: {Path.GetFileName(excelPath)} / シート: {sheet} / 範囲: {range}";
@@ -680,6 +783,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IrConstants.ActionChromeSubmit => ("📤", "Chrome フォーム外部送信", "#D97706"),
             IrConstants.ActionExcelReadRange => ("📖", "Excel データ読み取り", "#16A34A"),
             IrConstants.ActionExcelWriteRange => ("📝", "Excel データ書き込み", "#15803D"),
+            IrConstants.ActionCustomAppClick => ("🖥", "独自アプリ クリック操作", "#7C3AED"),
+            IrConstants.ActionCustomAppFill => ("⌨️", "独自アプリ 文字入力", "#9333EA"),
+            IrConstants.ActionCustomAppReadText => ("🔍", "独自アプリ テキスト取得", "#6D28D9"),
             _ => ("⚙️", "アクション", "#475569")
         };
 
@@ -1142,9 +1248,41 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
         var ev = _recordingService.RecordEvent(
             "Excel", "Write", null, null, null, null, null,
-            StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, StepExcelWriteTextInput);
+            StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, StepExcelWriteTextInput,
+            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.98);
         RecordedEvents.Add(ev);
         StatusBanner = $"🔴 Excel書き込み（{ev.SheetName}!{ev.RangeAddress}）を記録しました。";
+    }
+
+    public void RecordSimulatedCustomAppAction()
+    {
+        if (!_recordingService.IsRecording) _recordingService.StartRecording();
+        var now = DateTimeOffset.UtcNow;
+        string appName = string.IsNullOrWhiteSpace(StepCustomAppNameInput) ? "基幹業務システム" : StepCustomAppNameInput.Trim();
+        string controlName = string.IsNullOrWhiteSpace(StepElementNameInput) ? "受注番号" : StepElementNameInput.Trim();
+        string fillVal = string.IsNullOrWhiteSpace(StepFillValueInput) ? "ORD-2026-001" : StepFillValueInput;
+
+        // 複数ログソース（OsInputHook + UiAutomation + CustomAppHook）から独自アプリ操作を記録
+        var evHook = _recordingService.RecordEvent(
+            "CustomApp", "Input", null, null, null, null, null,
+            appName, null, null, fillVal[..Math.Min(3, fillVal.Length)],
+            logSource: LogSourceConstants.OsInputHook, coordinateX: 280, coordinateY: 190,
+            sourceConfidence: 0.3, windowOrProcessName: appName, timestampOverride: now);
+        var evUia = _recordingService.RecordEvent(
+            "CustomApp", "Input", "text", "textbox", controlName, controlName, null,
+            appName, null, null, fillVal,
+            logSource: LogSourceConstants.UiAutomation, coordinateX: 280, coordinateY: 190,
+            sourceConfidence: 0.90, windowOrProcessName: appName, timestampOverride: now.AddMilliseconds(80));
+        var evApp = _recordingService.RecordEvent(
+            "CustomApp", "Input", "text", "textbox", controlName, controlName, $"ctrl-{controlName}",
+            appName, null, null, fillVal,
+            logSource: LogSourceConstants.CustomAppHook,
+            sourceConfidence: 0.99, windowOrProcessName: appName, timestampOverride: now.AddMilliseconds(120));
+
+        RecordedEvents.Add(evHook);
+        RecordedEvents.Add(evUia);
+        RecordedEvents.Add(evApp);
+        StatusBanner = $"🔴 独自アプリ「{appName}」の複数ログ（OSフック・UIAutomation・アプリログ）を記録しました。";
     }
 
     public async Task GenerateMacroFromRecordingViaAiAsync()
@@ -1279,6 +1417,25 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 var a = args.Deserialize<ExcelWriteRangeArgs>();
                 return ("📝 Excelに書き込む", $"{Path.GetFileName(a?.WorkbookPath ?? "")} [{a?.SheetName}!{a?.RangeAddress}]");
             }
+            case IrConstants.ActionCustomAppClick:
+            {
+                var a = args.Deserialize<CustomAppClickArgs>();
+                string target = a?.Locator?.AccessibleName ?? a?.Locator?.Label ?? "ボタン";
+                return ("🖥 独自アプリのボタンを押す", $"{a?.ApplicationName} [{target}]");
+            }
+            case IrConstants.ActionCustomAppFill:
+            {
+                var a = args.Deserialize<CustomAppFillArgs>();
+                string target = a?.Locator?.Label ?? a?.Locator?.AccessibleName ?? "入力欄";
+                string val = a?.IsSensitive == true ? "******** (保護)" : (a?.Value ?? "");
+                return ("⌨️ 独自アプリに文字を入力", $"{a?.ApplicationName} [{target}: {val}]");
+            }
+            case IrConstants.ActionCustomAppReadText:
+            {
+                var a = args.Deserialize<CustomAppReadTextArgs>();
+                string target = a?.Locator?.Label ?? a?.Locator?.AccessibleName ?? "テキスト";
+                return ("🔍 独自アプリの文字を読み取る", $"{a?.ApplicationName} [{target}]");
+            }
             default:
                 return (node.ActionType ?? "アクション", "");
         }
@@ -1384,6 +1541,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IrConstants.ActionChromeSubmit => "📤 フォームを外部送信",
             IrConstants.ActionExcelReadRange => "📖 Excelを読み取る",
             IrConstants.ActionExcelWriteRange => "📝 Excelに書き込む",
+            IrConstants.ActionCustomAppClick => "🖥 独自アプリのボタンを押す",
+            IrConstants.ActionCustomAppFill => "⌨️ 独自アプリに文字を入力",
+            IrConstants.ActionCustomAppReadText => "🔍 独自アプリの文字を読み取る",
             _ => item.ActionType
         };
 

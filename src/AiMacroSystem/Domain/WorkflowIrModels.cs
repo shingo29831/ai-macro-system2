@@ -22,6 +22,9 @@ public static class IrConstants
     public const string ActionChromeSubmit = "Chrome.Submit";
     public const string ActionExcelReadRange = "Excel.ReadRange";
     public const string ActionExcelWriteRange = "Excel.WriteRange";
+    public const string ActionCustomAppClick = "CustomApp.Click";
+    public const string ActionCustomAppFill = "CustomApp.Fill";
+    public const string ActionCustomAppReadText = "CustomApp.ReadText";
 
     public const string TypeString = "String";
     public const string TypeNumber = "Number";
@@ -323,4 +326,46 @@ public sealed class ExcelWriteRangeArgs
 
     [JsonPropertyName("allowOverwrite")]
     public bool AllowOverwrite { get; set; }
+}
+
+public sealed class CustomAppClickArgs
+{
+    [JsonPropertyName("applicationName")]
+    public string ApplicationName { get; set; } = string.Empty;
+
+    [JsonPropertyName("locator")]
+    public SemanticLocator? Locator { get; set; }
+
+    [JsonPropertyName("expectedWindowState")]
+    public string? ExpectedWindowState { get; set; }
+
+    [JsonPropertyName("isDestructive")]
+    public bool IsDestructive { get; set; }
+}
+
+public sealed class CustomAppFillArgs
+{
+    [JsonPropertyName("applicationName")]
+    public string ApplicationName { get; set; } = string.Empty;
+
+    [JsonPropertyName("locator")]
+    public SemanticLocator? Locator { get; set; }
+
+    [JsonPropertyName("value")]
+    public string? Value { get; set; }
+
+    [JsonPropertyName("valueRef")]
+    public DataReference? ValueRef { get; set; }
+
+    [JsonPropertyName("isSensitive")]
+    public bool IsSensitive { get; set; }
+}
+
+public sealed class CustomAppReadTextArgs
+{
+    [JsonPropertyName("applicationName")]
+    public string ApplicationName { get; set; } = string.Empty;
+
+    [JsonPropertyName("locator")]
+    public SemanticLocator? Locator { get; set; }
 }

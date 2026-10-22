@@ -199,6 +199,41 @@ public sealed class SqliteRepository
         cmd.ExecuteNonQuery();
 
         EnsureApprovalIdColumnExists(conn);
+        EnsureRawEventsMultiLogColumnsExist(conn);
+    }
+
+    private static void EnsureRawEventsMultiLogColumnsExist(SqliteConnection conn)
+    {
+        var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var checkCmd = conn.CreateCommand())
+        {
+            checkCmd.CommandText = "PRAGMA table_info(RecordedRawEvents);";
+            using var reader = checkCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                existingCols.Add(reader.GetString(1));
+            }
+        }
+
+        (string Name, string SqlType)[] requiredColumns =
+        {
+            ("LogSource", "TEXT NOT NULL DEFAULT 'PrimaryHook'"),
+            ("CssSelector", "TEXT NULL"),
+            ("CoordinateX", "INTEGER NULL"),
+            ("CoordinateY", "INTEGER NULL"),
+            ("SourceConfidence", "REAL NOT NULL DEFAULT 0.85"),
+            ("WindowOrProcessName", "TEXT NULL")
+        };
+
+        foreach (var (colName, sqlType) in requiredColumns)
+        {
+            if (!existingCols.Contains(colName))
+            {
+                using var alterCmd = conn.CreateCommand();
+                alterCmd.CommandText = $"ALTER TABLE RecordedRawEvents ADD COLUMN {colName} {sqlType};";
+                alterCmd.ExecuteNonQuery();
+            }
+        }
     }
 
     private static void EnsureApprovalIdColumnExists(SqliteConnection conn)
@@ -1042,9 +1077,11 @@ public sealed class SqliteRepository
         cmd.CommandText = """
             INSERT OR REPLACE INTO RecordedRawEvents (
                 EventId, ApplicationKind, EventKind, TargetRole, TargetName, TargetLabel, TargetStableId,
-                UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp
+                UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp,
+                LogSource, CssSelector, CoordinateX, CoordinateY, SourceConfidence, WindowOrProcessName
             ) VALUES (
-                $id, $app, $kind, $role, $name, $label, $sid, $url, $sheet, $range, $val, $sens, $ts
+                $id, $app, $kind, $role, $name, $label, $sid, $url, $sheet, $range, $val, $sens, $ts,
+                $lsrc, $css, $cx, $cy, $conf, $win
             );
             """;
         cmd.Parameters.AddWithValue("$id", ev.EventId);
@@ -1060,6 +1097,12 @@ public sealed class SqliteRepository
         cmd.Parameters.AddWithValue("$val", (object?)(ev.IsSensitive ? SensitiveDataProtector.RedactedPlaceholder : SensitiveDataProtector.SanitizeText(ev.CapturedValue)) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$sens", ev.IsSensitive ? 1 : 0);
         cmd.Parameters.AddWithValue("$ts", ev.Timestamp.ToString("O"));
+        cmd.Parameters.AddWithValue("$lsrc", string.IsNullOrWhiteSpace(ev.LogSource) ? LogSourceConstants.PrimaryHook : ev.LogSource);
+        cmd.Parameters.AddWithValue("$css", (object?)ev.CssSelector ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$cx", ev.CoordinateX.HasValue ? ev.CoordinateX.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$cy", ev.CoordinateY.HasValue ? ev.CoordinateY.Value : DBNull.Value);
+        cmd.Parameters.AddWithValue("$conf", ev.SourceConfidence);
+        cmd.Parameters.AddWithValue("$win", (object?)ev.WindowOrProcessName ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 
@@ -1096,7 +1139,8 @@ public sealed class SqliteRepository
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             SELECT EventId, ApplicationKind, EventKind, TargetRole, TargetName, TargetLabel, TargetStableId,
-                   UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp
+                   UrlOrWorkbookPath, SheetName, RangeAddress, CapturedValue, IsSensitive, Timestamp,
+                   LogSource, CssSelector, CoordinateX, CoordinateY, SourceConfidence, WindowOrProcessName
             FROM RecordedRawEvents
             ORDER BY Timestamp ASC;
             """;
@@ -1117,7 +1161,13 @@ public sealed class SqliteRepository
                 reader.IsDBNull(9) ? null : reader.GetString(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
                 reader.GetInt32(11) == 1,
-                DateTimeOffset.Parse(reader.GetString(12))));
+                DateTimeOffset.Parse(reader.GetString(12)),
+                reader.IsDBNull(13) ? LogSourceConstants.PrimaryHook : reader.GetString(13),
+                reader.IsDBNull(14) ? null : reader.GetString(14),
+                reader.IsDBNull(15) ? null : reader.GetInt32(15),
+                reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                reader.IsDBNull(17) ? 0.85 : reader.GetDouble(17),
+                reader.IsDBNull(18) ? null : reader.GetString(18)));
         }
         return list;
     }

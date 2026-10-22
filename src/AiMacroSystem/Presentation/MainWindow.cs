@@ -222,8 +222,8 @@ public sealed class MainWindow : Window
         var dock = new DockPanel();
 
         var topBar = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-        var newBtn = CreateButton("＋ 新しいマクロを作る", _accentPrimary, Colors.White, isCompact: false);
-        newBtn.Click += (_, _) => _vm.StartNewMacroInEditor();
+        var newBtn = CreateButton("🔴 複数ログ記録から新しいマクロを生成", _accentPrimary, Colors.White, isCompact: false);
+        newBtn.Click += (_, _) => _mainTabs.SelectedIndex = 1;
         DockPanel.SetDock(newBtn, Dock.Right);
         topBar.Children.Add(newBtn);
 
@@ -345,11 +345,16 @@ public sealed class MainWindow : Window
         topControls.Children.Add(simPwdBtn);
 
         var simExcelBtn = CreateButton("＋ Excel書込イベント記録", _accentNeutral, _textPrimary, isCompact: true);
-        simExcelBtn.Margin = new Thickness(0, 0, 16, 6);
+        simExcelBtn.Margin = new Thickness(0, 0, 8, 6);
         simExcelBtn.Click += (_, _) => _vm.RecordSimulatedExcelWrite();
         topControls.Children.Add(simExcelBtn);
 
-        var aiGenBtn = CreateButton("✨ 記録からAIでWorkflow IR候補を生成・全8段階検証", _accentPrimary, Colors.White, isCompact: true);
+        var simCustomAppBtn = CreateButton("＋ 独自アプリ複数ログ記録", _accentNeutral, _textPrimary, isCompact: true);
+        simCustomAppBtn.Margin = new Thickness(0, 0, 16, 6);
+        simCustomAppBtn.Click += (_, _) => _vm.RecordSimulatedCustomAppAction();
+        topControls.Children.Add(simCustomAppBtn);
+
+        var aiGenBtn = CreateButton("✨ 複数ログから高精度抽出しマクロを生成・全8段階検証", _accentPrimary, Colors.White, isCompact: true);
         aiGenBtn.Margin = new Thickness(0, 0, 0, 6);
         aiGenBtn.Click += async (_, _) => await _vm.GenerateMacroFromRecordingViaAiAsync();
         topControls.Children.Add(aiGenBtn);
@@ -358,9 +363,10 @@ public sealed class MainWindow : Window
         dock.Children.Add(topControls);
 
         var recGrid = CreateCleanDataGrid();
-        recGrid.Columns.Add(new DataGridTextColumn { Header = "Event ID", Binding = new Binding("EventId"), Width = 170 });
-        recGrid.Columns.Add(new DataGridTextColumn { Header = "対象アプリ", Binding = new Binding("ApplicationKind"), Width = 100 });
-        recGrid.Columns.Add(new DataGridTextColumn { Header = "操作種別", Binding = new Binding("EventKind"), Width = 100 });
+        recGrid.Columns.Add(new DataGridTextColumn { Header = "Event ID", Binding = new Binding("EventId"), Width = 140 });
+        recGrid.Columns.Add(new DataGridTextColumn { Header = "ログソース", Binding = new Binding("LogSource"), Width = 110 });
+        recGrid.Columns.Add(new DataGridTextColumn { Header = "対象アプリ", Binding = new Binding("ApplicationKind"), Width = 95 });
+        recGrid.Columns.Add(new DataGridTextColumn { Header = "操作種別", Binding = new Binding("EventKind"), Width = 95 });
         recGrid.Columns.Add(new DataGridTextColumn { Header = "対象URL / ブック", Binding = new Binding("UrlOrWorkbookPath"), Width = 220 });
         recGrid.Columns.Add(new DataGridTextColumn { Header = "対象ラベル/範囲", Binding = new Binding("TargetLabel"), Width = 140 });
         recGrid.Columns.Add(new DataGridTextColumn { Header = "記録値 (機密保護済)", Binding = new Binding("CapturedValue"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
@@ -1011,11 +1017,14 @@ public sealed class MainWindow : Window
         bool isSubmit = actionKind == IrConstants.ActionChromeSubmit;
         bool isExcelRead = actionKind == IrConstants.ActionExcelReadRange;
         bool isExcelWrite = actionKind == IrConstants.ActionExcelWriteRange;
+        bool isCustomClick = actionKind == IrConstants.ActionCustomAppClick;
+        bool isCustomFill = actionKind == IrConstants.ActionCustomAppFill;
+        bool isCustomRead = actionKind == IrConstants.ActionCustomAppReadText;
 
         _fieldUrlPanel.Visibility = (isNav || isSubmit) ? Visibility.Visible : Visibility.Collapsed;
-        _fieldElementPanel.Visibility = (isFill || isClick || isSubmit) ? Visibility.Visible : Visibility.Collapsed;
-        _fieldValuePanel.Visibility = isFill ? Visibility.Visible : Visibility.Collapsed;
-        _fieldPasswordCheck.Visibility = isFill ? Visibility.Visible : Visibility.Collapsed;
+        _fieldElementPanel.Visibility = (isFill || isClick || isSubmit || isCustomClick || isCustomFill || isCustomRead) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldValuePanel.Visibility = (isFill || isCustomFill) ? Visibility.Visible : Visibility.Collapsed;
+        _fieldPasswordCheck.Visibility = (isFill || isCustomFill) ? Visibility.Visible : Visibility.Collapsed;
 
         _fieldExcelPathPanel.Visibility = (isExcelRead || isExcelWrite) ? Visibility.Visible : Visibility.Collapsed;
         _fieldExcelMetaGrid.Visibility = (isExcelRead || isExcelWrite) ? Visibility.Visible : Visibility.Collapsed;
