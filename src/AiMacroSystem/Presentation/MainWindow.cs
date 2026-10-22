@@ -103,17 +103,37 @@ public sealed class MainWindow : Window
                 RebuildVisualBlockChain();
             }
         }
-        else if (e.PropertyName == nameof(MainViewModel.IsExecutingMacro))
+        else if (e.PropertyName is nameof(MainViewModel.IsExecutingMacro) or nameof(MainViewModel.IsRecordingMacro))
         {
-            if (_vm.IsExecutingMacro)
+            bool showOverlay = _vm.IsRecordingMacro || _vm.IsExecutingMacro;
+            if (showOverlay)
             {
+                _overlayWindow.UpdateOverlayMode(isRecording: _vm.IsRecordingMacro);
                 _overlayWindow.PositionAtTopCenter();
-                _overlayWindow.Show();
+                if (!_overlayWindow.IsVisible)
+                {
+                    _overlayWindow.Show();
+                }
+                if (IsVisible)
+                {
+                    Hide();
+                }
             }
             else
             {
-                _overlayWindow.Hide();
+                if (!IsVisible)
+                {
+                    Show();
+                }
+                if (WindowState == WindowState.Minimized)
+                {
+                    WindowState = WindowState.Normal;
+                }
                 Activate();
+                if (_overlayWindow.IsVisible)
+                {
+                    _overlayWindow.Hide();
+                }
             }
         }
     }
@@ -172,6 +192,12 @@ public sealed class MainWindow : Window
         Grid.SetColumn(statusPill, 1);
         grid.Children.Add(statusPill);
 
+        var headerRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: true);
+        headerRecBtn.Margin = new Thickness(12, 0, 0, 0);
+        headerRecBtn.Click += (_, _) => _vm.StartEasyRecording();
+        Grid.SetColumn(headerRecBtn, 2);
+        grid.Children.Add(headerRecBtn);
+
         header.Child = grid;
         return header;
     }
@@ -222,8 +248,8 @@ public sealed class MainWindow : Window
         var dock = new DockPanel();
 
         var topBar = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
-        var newBtn = CreateButton("🔴 複数ログ記録から新しいマクロを生成", _accentPrimary, Colors.White, isCompact: false);
-        newBtn.Click += (_, _) => _mainTabs.SelectedIndex = 1;
+        var newBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: false);
+        newBtn.Click += (_, _) => _vm.StartEasyRecording();
         DockPanel.SetDock(newBtn, Dock.Right);
         topBar.Children.Add(newBtn);
 
@@ -324,9 +350,9 @@ public sealed class MainWindow : Window
         startRecBtn.Click += (_, _) => _vm.StartEasyRecording();
         topControls.Children.Add(startRecBtn);
 
-        var stopRecBtn = CreateButton("⏹ 記録停止", _accentNeutral, _textPrimary, isCompact: true);
+        var stopRecBtn = CreateButton("⏹ 記録終了（自動でマクロへ変換）", _accentNeutral, _textPrimary, isCompact: true);
         stopRecBtn.Margin = new Thickness(0, 0, 16, 6);
-        stopRecBtn.Click += (_, _) => _vm.StopEasyRecording();
+        stopRecBtn.Click += async (_, _) => await _vm.StopEasyRecordingAndGenerateAsync();
         topControls.Children.Add(stopRecBtn);
 
         var simWebBtn = CreateButton("＋ Chrome遷移イベント記録", _accentNeutral, _textPrimary, isCompact: true);

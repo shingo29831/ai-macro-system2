@@ -144,7 +144,7 @@ public sealed class LiveCustomAppDriver : ICustomAppDriver
     {
         ct.ThrowIfCancellationRequested();
         string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
-        return Task.FromResult(_controlValues.TryGetValue(key, out string? val) ? val : "完了ステータス:OK");
+        return Task.FromResult<string?>(_controlValues.TryGetValue(key, out string? val) ? val : "完了ステータス:OK");
     }
 }
 

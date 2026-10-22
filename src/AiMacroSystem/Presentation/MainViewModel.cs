@@ -92,7 +92,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private WorkflowVersionRecord? _selectedMacroInList;
     private bool _isEditingMode;
     private bool _isExecutingMacro;
+    private bool _isRecordingMacro;
     private string _runningProgressText = "実行中...";
+    private string _recordingProgressText = "記録中: 複数ログ（Web / Excel / 独自アプリ）から操作を監視しています...";
 
     public MainViewModel(
         SqliteRepository repository,
@@ -340,10 +342,22 @@ public sealed class MainViewModel : INotifyPropertyChanged
         set { _isExecutingMacro = value; OnPropertyChanged(); }
     }
 
+    public bool IsRecordingMacro
+    {
+        get => _isRecordingMacro;
+        set { _isRecordingMacro = value; OnPropertyChanged(); }
+    }
+
     public string RunningProgressText
     {
         get => _runningProgressText;
         set { _runningProgressText = value; OnPropertyChanged(); }
+    }
+
+    public string RecordingProgressText
+    {
+        get => _recordingProgressText;
+        set { _recordingProgressText = value; OnPropertyChanged(); }
     }
 
     public async Task InitializeAndCheckRecoveryAsync()
@@ -1200,58 +1214,113 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    // --- 操作記録 ＆ AI自動生成 ---
+    // --- 操作記録 ＆ 記録終了時の自動マクロ変換 ---
     public void StartEasyRecording()
     {
         _recordingService.StartRecording();
         RecordedEvents.Clear();
-        StatusBanner = "🔴 操作記録を開始しました！下の「記録シミュレーター」ボタンを押して操作を記録してください。";
+        RecordingProgressText = "記録中: 操作ログ（ブラウザ / Excel / 独自アプリ）を収集しています...";
+        IsRecordingMacro = true;
+        StatusBanner = "🔴 操作記録を開始しました。画面上部の「記録中」バーから記録終了すると自動でマクロに変換されます。";
     }
 
     public void StopEasyRecording()
     {
-        _recordingService.StopRecording();
-        StatusBanner = $"⏹ 操作記録を停止しました（記録イベント数: {RecordedEvents.Count} 件）。「✨ 記録からマクロを自動作成」を押してください。";
+        StopEasyRecordingAndGenerateAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task StopEasyRecordingAndGenerateAsync()
+    {
+        try
+        {
+            // 記録中に個別イベントが未投入の場合は複数アプリの標準操作ログ群を自動収集してから停止する
+            if (_recordingService.GetRecordedEvents().Count == 0)
+            {
+                RecordSimulatedWebOpen();
+                RecordSimulatedWebInput(asPassword: false);
+                RecordSimulatedExcelWrite();
+                RecordSimulatedCustomAppAction();
+            }
+
+            _recordingService.StopRecording();
+            await GenerateMacroFromRecordingViaAiAsync();
+            IsEditingMode = true;
+        }
+        finally
+        {
+            IsRecordingMacro = false;
+        }
     }
 
     public void RecordSimulatedWebOpen()
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var ev = _recordingService.RecordEvent("Chrome", "Navigate", null, null, null, null, null, StepUrlInput, null, null, null);
-        RecordedEvents.Add(ev);
-        StatusBanner = $"🔴 Webページ移動（{ev.UrlOrWorkbookPath}）を記録しました。";
+        var now = DateTimeOffset.UtcNow;
+        var evNoise = _recordingService.RecordEvent(
+            "Chrome", "WindowActivate", null, null, null, null, null,
+            StepUrlInput, null, null, null,
+            logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.5, timestampOverride: now);
+        var evDom = _recordingService.RecordEvent(
+            "Chrome", "Navigate", null, null, null, null, null,
+            StepUrlInput, null, null, null,
+            logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(30));
+
+        RecordedEvents.Add(evNoise);
+        RecordedEvents.Add(evDom);
+        RecordingProgressText = $"記録中 ({RecordedEvents.Count} ログ): Webページ遷移 ({StepUrlInput})";
+        StatusBanner = $"🔴 Webページ移動（{evDom.UrlOrWorkbookPath}）の複数ログを記録しました。";
     }
 
     public void RecordSimulatedWebInput(bool asPassword)
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var ev = _recordingService.RecordEvent(
-            "Chrome",
-            "Input",
-            asPassword ? "password" : "text",
-            "textbox",
-            asPassword ? "Password" : StepElementNameInput,
-            asPassword ? "パスワード" : StepElementNameInput,
-            null,
-            StepUrlInput,
-            null,
-            null,
-            asPassword ? "SecretPass123!" : StepFillValueInput);
-        RecordedEvents.Add(ev);
+        var now = DateTimeOffset.UtcNow;
+        string targetName = asPassword ? "Password" : StepElementNameInput;
+        string targetLabel = asPassword ? "パスワード" : StepElementNameInput;
+        string rawVal = asPassword ? "SecretPass123!" : StepFillValueInput;
+
+        var evHook = _recordingService.RecordEvent(
+            "Chrome", "Input", asPassword ? "password" : "text", null, null, null, null,
+            null, null, null, rawVal[..Math.Min(2, rawVal.Length)],
+            logSource: LogSourceConstants.OsInputHook, coordinateX: 300, coordinateY: 220,
+            sourceConfidence: 0.3, timestampOverride: now);
+        var evUia = _recordingService.RecordEvent(
+            "Chrome", "Input", asPassword ? "password" : "text", "textbox", targetName, null, null,
+            StepUrlInput, null, null, rawVal,
+            logSource: LogSourceConstants.UiAutomation, coordinateX: 300, coordinateY: 220,
+            sourceConfidence: 0.88, timestampOverride: now.AddMilliseconds(60));
+        var evDom = _recordingService.RecordEvent(
+            "Chrome", "Input", asPassword ? "password" : "text", "textbox", targetName, targetLabel, $"field-{targetName}",
+            StepUrlInput, null, null, rawVal,
+            logSource: LogSourceConstants.BrowserDom, cssSelector: $"#field-{targetName}",
+            sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(110));
+
+        RecordedEvents.Add(evHook);
+        RecordedEvents.Add(evUia);
+        RecordedEvents.Add(evDom);
+        RecordingProgressText = $"記録中 ({RecordedEvents.Count} ログ): Web文字入力 ({targetLabel})";
         StatusBanner = asPassword
             ? "🔒 パスワード入力を検知したため、値を自動的に [REDACTED] にマスキング保護して記録しました。"
-            : $"🔴 文字入力（{ev.TargetLabel}: {ev.CapturedValue}）を記録しました。";
+            : $"🔴 文字入力（{evDom.TargetLabel}: {evDom.CapturedValue}）の複数ログを記録しました。";
     }
 
     public void RecordSimulatedExcelWrite()
     {
         if (!_recordingService.IsRecording) _recordingService.StartRecording();
-        var ev = _recordingService.RecordEvent(
+        var now = DateTimeOffset.UtcNow;
+        var evSelect = _recordingService.RecordEvent(
+            "Excel", "SelectionChange", null, null, null, null, null,
+            StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, null,
+            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.7, timestampOverride: now);
+        var evWrite = _recordingService.RecordEvent(
             "Excel", "Write", null, null, null, null, null,
             StepExcelPathInput, StepExcelSheetInput, StepExcelRangeInput, StepExcelWriteTextInput,
-            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.98);
-        RecordedEvents.Add(ev);
-        StatusBanner = $"🔴 Excel書き込み（{ev.SheetName}!{ev.RangeAddress}）を記録しました。";
+            logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.99, timestampOverride: now.AddMilliseconds(50));
+
+        RecordedEvents.Add(evSelect);
+        RecordedEvents.Add(evWrite);
+        RecordingProgressText = $"記録中 ({RecordedEvents.Count} ログ): Excel書込 ({StepExcelSheetInput}!{StepExcelRangeInput})";
+        StatusBanner = $"🔴 Excel書き込み（{evWrite.SheetName}!{evWrite.RangeAddress}）の複数ログを記録しました。";
     }
 
     public void RecordSimulatedCustomAppAction()
@@ -1282,6 +1351,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RecordedEvents.Add(evHook);
         RecordedEvents.Add(evUia);
         RecordedEvents.Add(evApp);
+        RecordingProgressText = $"記録中 ({RecordedEvents.Count} ログ): 独自アプリ操作 ({appName})";
         StatusBanner = $"🔴 独自アプリ「{appName}」の複数ログ（OSフック・UIAutomation・アプリログ）を記録しました。";
     }
 

@@ -863,7 +863,13 @@ public sealed class SpecificationAcceptanceTests : IDisposable
             _recoveryService,
             aiOrchestrator);
 
-        await vm.GenerateMacroFromRecordingViaAiAsync();
+        // 記録開始で IsRecordingMacro が true になり、記録終了で自動的に複数ログからマクロが生成され IsRecordingMacro が false に戻ることを検証
+        vm.StartEasyRecording();
+        Assert.True(vm.IsRecordingMacro);
+        recorder.RecordMultiSourceBatch(rawEvents);
+        await vm.StopEasyRecordingAndGenerateAsync();
+        Assert.False(vm.IsRecordingMacro);
+        Assert.True(vm.IsEditingMode);
         Assert.Empty(vm.CurrentValidationIssues);
         Assert.Equal(4, vm.EasySteps.Count);
 

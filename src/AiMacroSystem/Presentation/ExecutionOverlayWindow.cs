@@ -1,4 +1,4 @@
-// Module: @role: マクロ実行中にモニター最上部中央へ常駐表示される小型フローティングUI
+// Module: @role: 記録中および実行中にメイン画面を隠してモニター最上部中央へ常駐表示される小型フローティングUI
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -9,12 +9,19 @@ namespace AiMacroSystem.Presentation;
 
 public sealed class ExecutionOverlayWindow : Window
 {
+    private readonly Border _pillBorder;
+    private readonly Border _modeBadge;
+    private readonly TextBlock _modeBadgeText;
+    private readonly TextBlock _statusText;
+    private readonly StackPanel _executionButtonsPanel;
+    private readonly StackPanel _recordingButtonsPanel;
+
     public ExecutionOverlayWindow(MainViewModel viewModel)
     {
         DataContext = viewModel;
-        Title = "マクロ実行中";
-        Width = 520;
-        Height = 56;
+        Title = "実行中 / 記録中";
+        Width = 740;
+        Height = 58;
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
         AllowsTransparency = true;
@@ -24,13 +31,13 @@ public sealed class ExecutionOverlayWindow : Window
 
         PositionAtTopCenter();
 
-        var pillBorder = new Border
+        _pillBorder = new Border
         {
             Background = new SolidColorBrush(Color.FromRgb(15, 23, 42)),
             BorderBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
             BorderThickness = new Thickness(1.5),
-            CornerRadius = new CornerRadius(28),
-            Padding = new Thickness(18, 8, 14, 8)
+            CornerRadius = new CornerRadius(29),
+            Padding = new Thickness(16, 8, 14, 8)
         };
 
         var grid = new Grid();
@@ -38,34 +45,40 @@ public sealed class ExecutionOverlayWindow : Window
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        // 緑色の実行中インジケータードット
-        var pulseDot = new Border
+        _modeBadge = new Border
         {
-            Width = 10,
-            Height = 10,
-            CornerRadius = new CornerRadius(5),
-            Background = new SolidColorBrush(Color.FromRgb(16, 185, 129)),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(10, 4, 10, 4),
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 10, 0)
+            Margin = new Thickness(0, 0, 12, 0),
+            Background = new SolidColorBrush(Color.FromRgb(16, 185, 129))
         };
-        Grid.SetColumn(pulseDot, 0);
-        grid.Children.Add(pulseDot);
+        _modeBadgeText = new TextBlock
+        {
+            Text = "実行中",
+            Foreground = Brushes.White,
+            FontWeight = FontWeights.Bold,
+            FontSize = 12
+        };
+        _modeBadge.Child = _modeBadgeText;
+        Grid.SetColumn(_modeBadge, 0);
+        grid.Children.Add(_modeBadge);
 
-        // 実行中マクロ名・ステップ表示
-        var progressText = new TextBlock
+        _statusText = new TextBlock
         {
             Foreground = Brushes.White,
             FontWeight = FontWeights.SemiBold,
-            FontSize = 13,
+            FontSize = 12.5,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
         };
-        progressText.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.RunningProgressText)));
-        Grid.SetColumn(progressText, 1);
-        grid.Children.Add(progressText);
+        Grid.SetColumn(_statusText, 1);
+        grid.Children.Add(_statusText);
 
-        // 一時停止・再開・停止ボタン
-        var btnStack = new StackPanel
+        var rightContainer = new Grid { VerticalAlignment = VerticalAlignment.Center };
+
+        // 実行中コントロール群
+        _executionButtonsPanel = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
@@ -74,21 +87,78 @@ public sealed class ExecutionOverlayWindow : Window
 
         var pauseBtn = CreateMiniButton("⏸ 一時停止", Color.FromRgb(51, 65, 85));
         pauseBtn.Click += (_, _) => viewModel.PauseActiveMacro();
-        btnStack.Children.Add(pauseBtn);
+        _executionButtonsPanel.Children.Add(pauseBtn);
 
         var resumeBtn = CreateMiniButton("▶ 再開", Color.FromRgb(37, 99, 235));
         resumeBtn.Click += (_, _) => viewModel.ResumeActiveMacro();
-        btnStack.Children.Add(resumeBtn);
+        _executionButtonsPanel.Children.Add(resumeBtn);
 
-        var stopBtn = CreateMiniButton("⏹ 停止", Color.FromRgb(220, 38, 38));
-        stopBtn.Click += (_, _) => viewModel.CancelActiveMacro();
-        btnStack.Children.Add(stopBtn);
+        var stopExecBtn = CreateMiniButton("⏹ 停止", Color.FromRgb(220, 38, 38));
+        stopExecBtn.Click += (_, _) => viewModel.CancelActiveMacro();
+        _executionButtonsPanel.Children.Add(stopExecBtn);
 
-        Grid.SetColumn(btnStack, 2);
-        grid.Children.Add(btnStack);
+        // 記録中コントロール群
+        _recordingButtonsPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(10, 0, 0, 0),
+            Visibility = Visibility.Collapsed
+        };
 
-        pillBorder.Child = grid;
-        Content = pillBorder;
+        var recWebBtn = CreateMiniButton("＋Web操作", Color.FromRgb(51, 65, 85));
+        recWebBtn.Click += (_, _) =>
+        {
+            viewModel.RecordSimulatedWebOpen();
+            viewModel.RecordSimulatedWebInput(asPassword: false);
+        };
+        _recordingButtonsPanel.Children.Add(recWebBtn);
+
+        var recExcelBtn = CreateMiniButton("＋Excel操作", Color.FromRgb(51, 65, 85));
+        recExcelBtn.Click += (_, _) => viewModel.RecordSimulatedExcelWrite();
+        _recordingButtonsPanel.Children.Add(recExcelBtn);
+
+        var recCustomBtn = CreateMiniButton("＋独自アプリ", Color.FromRgb(51, 65, 85));
+        recCustomBtn.Click += (_, _) => viewModel.RecordSimulatedCustomAppAction();
+        _recordingButtonsPanel.Children.Add(recCustomBtn);
+
+        var finishRecBtn = CreateMiniButton("⏹ 記録終了（自動変換）", Color.FromRgb(220, 38, 38));
+        finishRecBtn.Click += async (_, _) => await viewModel.StopEasyRecordingAndGenerateAsync();
+        _recordingButtonsPanel.Children.Add(finishRecBtn);
+
+        rightContainer.Children.Add(_executionButtonsPanel);
+        rightContainer.Children.Add(_recordingButtonsPanel);
+        Grid.SetColumn(rightContainer, 2);
+        grid.Children.Add(rightContainer);
+
+        _pillBorder.Child = grid;
+        Content = _pillBorder;
+
+        UpdateOverlayMode(isRecording: false);
+    }
+
+    public void UpdateOverlayMode(bool isRecording)
+    {
+        if (isRecording)
+        {
+            Title = "記録中";
+            _modeBadgeText.Text = "🔴 記録中";
+            _modeBadge.Background = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+            _pillBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(248, 113, 113));
+            _statusText.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.RecordingProgressText)));
+            _executionButtonsPanel.Visibility = Visibility.Collapsed;
+            _recordingButtonsPanel.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            Title = "実行中";
+            _modeBadgeText.Text = "▶ 実行中";
+            _modeBadge.Background = new SolidColorBrush(Color.FromRgb(16, 185, 129));
+            _pillBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(56, 189, 248));
+            _statusText.SetBinding(TextBlock.TextProperty, new Binding(nameof(MainViewModel.RunningProgressText)));
+            _recordingButtonsPanel.Visibility = Visibility.Collapsed;
+            _executionButtonsPanel.Visibility = Visibility.Visible;
+        }
     }
 
     public void PositionAtTopCenter()
