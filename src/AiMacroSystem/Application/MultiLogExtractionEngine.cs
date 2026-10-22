@@ -34,7 +34,8 @@ public sealed class MultiLogExtractionEngine
         "MouseDown", "MouseUp", "KeyDown", "KeyUp",
         "Focus", "Blur", "GotFocus", "LostFocus",
         "WindowFocus", "WindowActivate", "WindowActivated",
-        "Scroll", "Heartbeat", "TelemetryPing", "SelectionChange", "SheetActivate"
+        "Scroll", "Heartbeat", "TelemetryPing", "SelectionChange", "SheetActivate",
+        "Copy", "ClipboardCopy", "ClipboardUpdate"
     };
 
     private readonly MultiLogExtractionOptions _options;
@@ -72,15 +73,15 @@ public sealed class MultiLogExtractionEngine
 
             string appCategory = ResolveApplicationCategory(ev, context);
             string intentKind = NormalizeIntentKind(ev.EventKind, appCategory);
-            var enrichedEvent = context.EnrichEvent(ev, appCategory);
+            var (enrichedEvent, transferSourceIds) = context.EnrichEventAndConsumeTransfer(ev, appCategory, intentKind);
             context.AbsorbContextFrom(enrichedEvent);
 
-            if (TryMergeIntoRecentCluster(clusters, enrichedEvent, appCategory, intentKind))
+            if (TryMergeIntoRecentCluster(clusters, enrichedEvent, appCategory, intentKind, transferSourceIds))
             {
                 continue;
             }
 
-            clusters.Add(new EventCluster(appCategory, intentKind, enrichedEvent));
+            clusters.Add(new EventCluster(appCategory, intentKind, enrichedEvent, transferSourceIds));
         }
 
         var results = new List<NormalizedActionCandidate>(clusters.Count);
@@ -124,7 +125,7 @@ public sealed class MultiLogExtractionEngine
             return "CustomApp";
         }
 
-        // OS入力フックやUIAutomation等の汎用ログソースはターゲット特徴と直近コンテキストからアプリ種別を推論
+        // アプリ種別が "Auto" や未指定、またはOS横断フックの場合はURL・ブック・シート・ウィンドウ名・セレクターから自動判定する
         if (!string.IsNullOrWhiteSpace(ev.UrlOrWorkbookPath))
         {
             if (Uri.TryCreate(ev.UrlOrWorkbookPath, UriKind.Absolute, out Uri? uri) &&
@@ -149,12 +150,53 @@ public sealed class MultiLogExtractionEngine
             return "Excel";
         }
 
+        if (!string.IsNullOrWhiteSpace(ev.CssSelector))
+        {
+            return "Chrome";
+        }
+
         if (!string.IsNullOrWhiteSpace(ev.WindowOrProcessName))
         {
-            return "CustomApp";
+            string detectedFromWin = ClassifyWindowOrProcessName(ev.WindowOrProcessName);
+            if (!string.IsNullOrWhiteSpace(detectedFromWin))
+            {
+                return detectedFromWin;
+            }
         }
 
         return !string.IsNullOrWhiteSpace(context.LastAppCategory) ? context.LastAppCategory : "CustomApp";
+    }
+
+    public static string ClassifyWindowOrProcessName(string? windowOrProcessName)
+    {
+        if (string.IsNullOrWhiteSpace(windowOrProcessName))
+        {
+            return string.Empty;
+        }
+
+        string text = windowOrProcessName.Trim();
+        if (text.Contains("chrome", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("msedge", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("edge", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("firefox", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("brave", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("browser", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("ブラウザ", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Chrome";
+        }
+
+        if (text.Contains("excel", StringComparison.OrdinalIgnoreCase) ||
+            text.Contains("spreadsheet", StringComparison.OrdinalIgnoreCase) ||
+            text.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) ||
+            text.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase) ||
+            text.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) ||
+            text.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Excel";
+        }
+
+        return "CustomApp";
     }
 
     private static string NormalizeIntentKind(string eventKind, string appCategory)
@@ -189,7 +231,9 @@ public sealed class MultiLogExtractionEngine
             k.Equals("WriteRange", StringComparison.OrdinalIgnoreCase) ||
             k.Equals("SetCell", StringComparison.OrdinalIgnoreCase) ||
             k.Equals("EditCell", StringComparison.OrdinalIgnoreCase) ||
-            k.Equals("PasteRange", StringComparison.OrdinalIgnoreCase))
+            k.Equals("Paste", StringComparison.OrdinalIgnoreCase) ||
+            k.Equals("PasteRange", StringComparison.OrdinalIgnoreCase) ||
+            k.Equals("ClipboardPaste", StringComparison.OrdinalIgnoreCase))
         {
             return appCategory == "Excel" ? "Write" : "Input";
         }
@@ -211,7 +255,8 @@ public sealed class MultiLogExtractionEngine
         List<EventCluster> clusters,
         RawRecordedEvent current,
         string currentAppCategory,
-        string currentIntentKind)
+        string currentIntentKind,
+        IReadOnlyList<string> transferSourceIds)
     {
         // 複数ログソースの非同期到着・微小な時刻前後に対応するため時間窓内の直近クラスタを後方探索する
         for (int i = clusters.Count - 1; i >= 0; i--)
@@ -223,7 +268,7 @@ public sealed class MultiLogExtractionEngine
                 break;
             }
 
-            if (TryMergeIntoCluster(candidateCluster, current, currentAppCategory, currentIntentKind))
+            if (TryMergeIntoCluster(candidateCluster, current, currentAppCategory, currentIntentKind, transferSourceIds))
             {
                 return true;
             }
@@ -235,7 +280,8 @@ public sealed class MultiLogExtractionEngine
         EventCluster prev,
         RawRecordedEvent current,
         string currentAppCategory,
-        string currentIntentKind)
+        string currentIntentKind,
+        IReadOnlyList<string> transferSourceIds)
     {
         if (!string.Equals(prev.AppCategory, currentAppCategory, StringComparison.Ordinal))
         {
@@ -249,7 +295,7 @@ public sealed class MultiLogExtractionEngine
             elapsed <= _options.IncrementalInputDebounceWindow &&
             AreTargetsCompatibleForMerge(prev, current, requireExplicitMatchWhenBothHaveIdentity: true))
         {
-            prev.AddEvent(current, currentIntentKind);
+            prev.AddEvent(current, currentIntentKind, transferSourceIds);
             return true;
         }
 
@@ -258,7 +304,7 @@ public sealed class MultiLogExtractionEngine
             elapsed <= _options.IncrementalInputDebounceWindow &&
             AreExcelTargetsCompatible(prev, current))
         {
-            prev.AddEvent(current, currentIntentKind);
+            prev.AddEvent(current, currentIntentKind, transferSourceIds);
             return true;
         }
 
@@ -281,7 +327,7 @@ public sealed class MultiLogExtractionEngine
                 string upgradedIntent = (prev.IntentKind == "Submit" || currentIntentKind == "Submit")
                     ? "Submit"
                     : prev.IntentKind;
-                prev.AddEvent(current, upgradedIntent);
+                prev.AddEvent(current, upgradedIntent, transferSourceIds);
                 return true;
             }
         }
@@ -546,8 +592,8 @@ public sealed class MultiLogExtractionEngine
             bestSheet,
             bestRange);
 
-        var sourceEventIds = cluster.Events
-            .Select(e => e.EventId)
+        var sourceEventIds = cluster.ExtraSourceEventIds
+            .Concat(cluster.Events.Select(e => e.EventId))
             .Distinct(StringComparer.Ordinal)
             .ToList();
 
@@ -703,20 +749,36 @@ public sealed class MultiLogExtractionEngine
         public string AppCategory { get; }
         public string IntentKind { get; private set; }
         public List<RawRecordedEvent> Events { get; } = new();
+        public List<string> ExtraSourceEventIds { get; } = new();
         public DateTimeOffset LastTimestamp { get; private set; }
 
-        public EventCluster(string appCategory, string intentKind, RawRecordedEvent initialEvent)
+        public EventCluster(
+            string appCategory,
+            string intentKind,
+            RawRecordedEvent initialEvent,
+            IReadOnlyList<string>? extraSourceEventIds = null)
         {
             AppCategory = appCategory;
             IntentKind = intentKind;
             Events.Add(initialEvent);
+            if (extraSourceEventIds is { Count: > 0 })
+            {
+                ExtraSourceEventIds.AddRange(extraSourceEventIds);
+            }
             LastTimestamp = initialEvent.Timestamp;
         }
 
-        public void AddEvent(RawRecordedEvent ev, string updatedIntentKind)
+        public void AddEvent(
+            RawRecordedEvent ev,
+            string updatedIntentKind,
+            IReadOnlyList<string>? extraSourceEventIds = null)
         {
             IntentKind = updatedIntentKind;
             Events.Add(ev);
+            if (extraSourceEventIds is { Count: > 0 })
+            {
+                ExtraSourceEventIds.AddRange(extraSourceEventIds);
+            }
             if (ev.Timestamp > LastTimestamp)
             {
                 LastTimestamp = ev.Timestamp;
@@ -726,6 +788,8 @@ public sealed class MultiLogExtractionEngine
 
     private sealed class ActiveSessionContext
     {
+        private readonly List<string> _pendingTransferEventIds = new();
+
         public string? LastAppCategory { get; private set; }
         public string? LastBrowserUrl { get; private set; }
         public string? LastExcelWorkbookPath { get; private set; }
@@ -736,9 +800,48 @@ public sealed class MultiLogExtractionEngine
         public string? LastFocusedName { get; private set; }
         public string? LastFocusedLabel { get; private set; }
         public string? LastFocusedStableId { get; private set; }
+        public string? LastClipboardValue { get; private set; }
 
         public void AbsorbContextFrom(RawRecordedEvent ev)
         {
+            if (IsClipboardCopyEvent(ev.EventKind))
+            {
+                if (!string.IsNullOrWhiteSpace(ev.EventId))
+                {
+                    _pendingTransferEventIds.Add(ev.EventId);
+                }
+                if (!string.IsNullOrEmpty(ev.CapturedValue))
+                {
+                    LastClipboardValue = ev.CapturedValue;
+                }
+            }
+            else if (!string.IsNullOrEmpty(ev.CapturedValue) &&
+                     (ev.EventKind.Equals("Read", StringComparison.OrdinalIgnoreCase) ||
+                      ev.EventKind.Equals("ReadRange", StringComparison.OrdinalIgnoreCase) ||
+                      ev.EventKind.Equals("ReadText", StringComparison.OrdinalIgnoreCase) ||
+                      ev.EventKind.Equals("Extract", StringComparison.OrdinalIgnoreCase)))
+            {
+                LastClipboardValue = ev.CapturedValue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(ev.WindowOrProcessName))
+            {
+                string winCategory = ClassifyWindowOrProcessName(ev.WindowOrProcessName);
+                if (winCategory == "Chrome")
+                {
+                    LastAppCategory = "Chrome";
+                }
+                else if (winCategory == "Excel")
+                {
+                    LastAppCategory = "Excel";
+                }
+                else
+                {
+                    LastCustomAppName = ev.WindowOrProcessName;
+                    LastAppCategory = "CustomApp";
+                }
+            }
+
             if (!string.IsNullOrWhiteSpace(ev.UrlOrWorkbookPath))
             {
                 if (Uri.TryCreate(ev.UrlOrWorkbookPath, UriKind.Absolute, out Uri? uri) &&
@@ -750,7 +853,9 @@ public sealed class MultiLogExtractionEngine
                 }
                 else if (!string.IsNullOrWhiteSpace(ev.SheetName) ||
                          ev.ApplicationKind.Equals("Excel", StringComparison.OrdinalIgnoreCase) ||
-                         ev.LogSource.Equals(LogSourceConstants.ExcelCom, StringComparison.OrdinalIgnoreCase))
+                         ev.LogSource.Equals(LogSourceConstants.ExcelCom, StringComparison.OrdinalIgnoreCase) ||
+                         Path.GetExtension(ev.UrlOrWorkbookPath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase) ||
+                         Path.GetExtension(ev.UrlOrWorkbookPath).Equals(".csv", StringComparison.OrdinalIgnoreCase))
                 {
                     LastExcelWorkbookPath = ev.UrlOrWorkbookPath;
                     LastAppCategory = "Excel";
@@ -765,15 +870,6 @@ public sealed class MultiLogExtractionEngine
 
             if (!string.IsNullOrWhiteSpace(ev.SheetName)) LastExcelSheetName = ev.SheetName;
             if (!string.IsNullOrWhiteSpace(ev.RangeAddress)) LastExcelRangeAddress = ev.RangeAddress;
-            if (!string.IsNullOrWhiteSpace(ev.WindowOrProcessName))
-            {
-                LastCustomAppName = ev.WindowOrProcessName;
-                if (ev.ApplicationKind.Equals("CustomApp", StringComparison.OrdinalIgnoreCase) ||
-                    ev.ApplicationKind.Equals("DesktopApp", StringComparison.OrdinalIgnoreCase))
-                {
-                    LastAppCategory = "CustomApp";
-                }
-            }
 
             if (IsNoiseOrContextOnlyEvent(ev))
             {
@@ -791,7 +887,10 @@ public sealed class MultiLogExtractionEngine
             }
         }
 
-        public RawRecordedEvent EnrichEvent(RawRecordedEvent ev, string appCategory)
+        public (RawRecordedEvent Enriched, IReadOnlyList<string> TransferSourceIds) EnrichEventAndConsumeTransfer(
+            RawRecordedEvent ev,
+            string appCategory,
+            string intentKind)
         {
             string? urlOrBook = ev.UrlOrWorkbookPath;
             string? sheet = ev.SheetName;
@@ -822,7 +921,28 @@ public sealed class MultiLogExtractionEngine
             string? label = ev.TargetLabel ?? (lacksIdentity ? LastFocusedLabel : null);
             string? stableId = ev.TargetStableId ?? (lacksIdentity ? LastFocusedStableId : null);
 
-            return ev with
+            // ブラウザ等からのコピー＆ペースト（アプリ間データ移動）の自動補完とソースイベントID引き継ぎ
+            string? capturedValue = ev.CapturedValue;
+            bool isPasteEvent = ev.EventKind.Equals("Paste", StringComparison.OrdinalIgnoreCase) ||
+                                ev.EventKind.Equals("PasteRange", StringComparison.OrdinalIgnoreCase) ||
+                                ev.EventKind.Equals("ClipboardPaste", StringComparison.OrdinalIgnoreCase);
+
+            if (string.IsNullOrEmpty(capturedValue) &&
+                !string.IsNullOrEmpty(LastClipboardValue) &&
+                (isPasteEvent || (_pendingTransferEventIds.Count > 0 && intentKind is "Write" or "Input")))
+            {
+                capturedValue = LastClipboardValue;
+            }
+
+            IReadOnlyList<string> consumedTransferIds = Array.Empty<string>();
+            if (_pendingTransferEventIds.Count > 0 &&
+                (isPasteEvent || (!string.IsNullOrEmpty(LastClipboardValue) && string.Equals(capturedValue, LastClipboardValue, StringComparison.Ordinal))))
+            {
+                consumedTransferIds = _pendingTransferEventIds.ToList();
+                _pendingTransferEventIds.Clear();
+            }
+
+            var enriched = ev with
             {
                 TargetRole = role,
                 TargetName = name,
@@ -831,8 +951,17 @@ public sealed class MultiLogExtractionEngine
                 UrlOrWorkbookPath = urlOrBook,
                 SheetName = sheet,
                 RangeAddress = range,
-                WindowOrProcessName = winName
+                WindowOrProcessName = winName,
+                CapturedValue = capturedValue
             };
+
+            return (enriched, consumedTransferIds);
         }
+
+        private static bool IsClipboardCopyEvent(string? eventKind) =>
+            !string.IsNullOrWhiteSpace(eventKind) &&
+            (eventKind.Equals("Copy", StringComparison.OrdinalIgnoreCase) ||
+             eventKind.Equals("ClipboardCopy", StringComparison.OrdinalIgnoreCase) ||
+             eventKind.Equals("ClipboardUpdate", StringComparison.OrdinalIgnoreCase));
     }
 }

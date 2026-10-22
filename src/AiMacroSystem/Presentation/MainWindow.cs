@@ -201,11 +201,19 @@ public sealed class MainWindow : Window
         Grid.SetColumn(statusPill, 1);
         grid.Children.Add(statusPill);
 
+        var headerBtnStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
+
         var headerRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: true);
-        headerRecBtn.Margin = new Thickness(12, 0, 0, 0);
+        headerRecBtn.Margin = new Thickness(0, 0, 8, 0);
         headerRecBtn.Click += (_, _) => _vm.StartEasyRecording();
-        Grid.SetColumn(headerRecBtn, 2);
-        grid.Children.Add(headerRecBtn);
+        headerBtnStack.Children.Add(headerRecBtn);
+
+        var headerSaveBtn = CreateButton("💾 マクロを保存", _accentPrimary, Colors.White, isCompact: true);
+        headerSaveBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
+        headerBtnStack.Children.Add(headerSaveBtn);
+
+        Grid.SetColumn(headerBtnStack, 2);
+        grid.Children.Add(headerBtnStack);
 
         header.Child = grid;
         return header;
@@ -346,7 +354,7 @@ public sealed class MainWindow : Window
         return grid;
     }
 
-    // ② 操作記録・AI変換（開始・停止、記録状態、対象アプリ、機密保護、AI構造化IR生成）
+    // ② 操作記録・AI変換（アプリ自動判定・アプリ横断転記・機密保護・AI構造化IR生成）
     private Grid CreateRecordingTab()
     {
         var grid = new Grid { Margin = new Thickness(0, 8, 0, 0) };
@@ -354,45 +362,35 @@ public sealed class MainWindow : Window
         var dock = new DockPanel();
 
         var topControls = new WrapPanel { Margin = new Thickness(0, 0, 0, 12) };
-        var startRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: true);
+        var startRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: false);
         startRecBtn.Margin = new Thickness(0, 0, 8, 6);
         startRecBtn.Click += (_, _) => _vm.StartEasyRecording();
         topControls.Children.Add(startRecBtn);
 
-        var stopRecBtn = CreateButton("⏹ 記録終了（自動でマクロへ変換）", _accentNeutral, _textPrimary, isCompact: true);
-        stopRecBtn.Margin = new Thickness(0, 0, 16, 6);
+        var stopRecBtn = CreateButton("⏹ 記録終了（自動でマクロへ変換）", _accentNeutral, _textPrimary, isCompact: false);
+        stopRecBtn.Margin = new Thickness(0, 0, 8, 6);
         stopRecBtn.Click += async (_, _) => await _vm.StopEasyRecordingAndGenerateAsync();
         topControls.Children.Add(stopRecBtn);
 
-        var simWebBtn = CreateButton("＋ Chrome遷移イベント記録", _accentNeutral, _textPrimary, isCompact: true);
-        simWebBtn.Margin = new Thickness(0, 0, 8, 6);
-        simWebBtn.Click += (_, _) => _vm.RecordSimulatedWebOpen();
-        topControls.Children.Add(simWebBtn);
+        var saveMacroBtn = CreateButton("💾 マクロを保存", _accentSuccess, Colors.White, isCompact: false);
+        saveMacroBtn.Margin = new Thickness(0, 0, 12, 6);
+        saveMacroBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
+        topControls.Children.Add(saveMacroBtn);
 
-        var simInputBtn = CreateButton("＋ Chrome入力イベント記録", _accentNeutral, _textPrimary, isCompact: true);
-        simInputBtn.Margin = new Thickness(0, 0, 8, 6);
-        simInputBtn.Click += (_, _) => _vm.RecordSimulatedWebInput(asPassword: false);
-        topControls.Children.Add(simInputBtn);
-
-        var simPwdBtn = CreateButton("＋ パスワード入力記録(自動保護)", _accentNeutral, _textPrimary, isCompact: true);
-        simPwdBtn.Margin = new Thickness(0, 0, 8, 6);
-        simPwdBtn.Click += (_, _) => _vm.RecordSimulatedWebInput(asPassword: true);
-        topControls.Children.Add(simPwdBtn);
-
-        var simExcelBtn = CreateButton("＋ Excel書込イベント記録", _accentNeutral, _textPrimary, isCompact: true);
-        simExcelBtn.Margin = new Thickness(0, 0, 8, 6);
-        simExcelBtn.Click += (_, _) => _vm.RecordSimulatedExcelWrite();
-        topControls.Children.Add(simExcelBtn);
-
-        var simCustomAppBtn = CreateButton("＋ 独自アプリ複数ログ記録", _accentNeutral, _textPrimary, isCompact: true);
-        simCustomAppBtn.Margin = new Thickness(0, 0, 16, 6);
-        simCustomAppBtn.Click += (_, _) => _vm.RecordSimulatedCustomAppAction();
-        topControls.Children.Add(simCustomAppBtn);
-
-        var aiGenBtn = CreateButton("✨ 複数ログから高精度抽出しマクロを生成・全8段階検証", _accentPrimary, Colors.White, isCompact: true);
-        aiGenBtn.Margin = new Thickness(0, 0, 0, 6);
+        var aiGenBtn = CreateButton("✨ 記録済み複数ログから再抽出・検証", _accentPrimary, Colors.White, isCompact: true);
+        aiGenBtn.Margin = new Thickness(0, 0, 12, 6);
         aiGenBtn.Click += async (_, _) => await _vm.GenerateMacroFromRecordingViaAiAsync();
         topControls.Children.Add(aiGenBtn);
+
+        var autoInfoText = new TextBlock
+        {
+            Text = "※ 操作中のアプリ（ブラウザ / Excel / 独自アプリ）およびブラウザからExcelへのコピー＆ペースト等のアプリ横断操作はアプリ側で自動判定・統合されます。",
+            Foreground = new SolidColorBrush(_textSecondary),
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 2, 0, 6)
+        };
+        topControls.Children.Add(autoInfoText);
 
         DockPanel.SetDock(topControls, Dock.Top);
         dock.Children.Add(topControls);
@@ -453,9 +451,14 @@ public sealed class MainWindow : Window
         validateBtn.Click += (_, _) => _vm.ValidateCurrentEditorIr();
         rightBtns.Children.Add(validateBtn);
 
-        var saveBtn = CreateButton("💾 新しい正式バージョンとして確定", _accentPrimary, Colors.White, isCompact: true);
+        var saveBtn = CreateButton("💾 マクロを保存", _accentPrimary, Colors.White, isCompact: false);
+        saveBtn.Margin = new Thickness(0, 0, 8, 0);
         saveBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
         rightBtns.Children.Add(saveBtn);
+
+        var quickRunBtn = CreateButton("▶ 保存してすぐ実行", _accentSuccess, Colors.White, isCompact: false);
+        quickRunBtn.Click += async (_, _) => await _vm.ExecuteOneClickAllInOneAsync();
+        rightBtns.Children.Add(quickRunBtn);
 
         Grid.SetColumn(rightBtns, 2);
         navGrid.Children.Add(rightBtns);
@@ -482,6 +485,31 @@ public sealed class MainWindow : Window
         flowHeader.Children.Add(new TextBlock { Text = "ビジュアルブロック連鎖", FontSize = 14, FontWeight = FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center });
         DockPanel.SetDock(flowHeader, Dock.Top);
         flowDock.Children.Add(flowHeader);
+
+        var flowFooter = new Grid { Margin = new Thickness(0, 10, 0, 0) };
+        flowFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        flowFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+        flowFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var saveBlocksBtn = CreateButton("💾 このマクロを保存する", _accentPrimary, Colors.White, isCompact: false);
+        saveBlocksBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
+        Grid.SetColumn(saveBlocksBtn, 0);
+        flowFooter.Children.Add(saveBlocksBtn);
+
+        var backToListBtn = CreateButton("📋 保存して一覧へ", _accentNeutral, _textPrimary, isCompact: false);
+        backToListBtn.Click += (_, _) =>
+        {
+            _vm.SaveCurrentWorkflowAsVersion();
+            if (_vm.CurrentValidationIssues.Count == 0)
+            {
+                _vm.IsEditingMode = false;
+            }
+        };
+        Grid.SetColumn(backToListBtn, 2);
+        flowFooter.Children.Add(backToListBtn);
+
+        DockPanel.SetDock(flowFooter, Dock.Bottom);
+        flowDock.Children.Add(flowFooter);
 
         var canvasScroll = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Background = new SolidColorBrush(_bgCanvas), Padding = new Thickness(12) };
         canvasScroll.Content = _visualBlockChainPanel;

@@ -905,5 +905,48 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         await vm.ExecuteOneClickAllInOneAsync();
         Assert.NotEmpty(vm.AllExecutions);
         Assert.Equal(ExecutionStatus.Succeeded, vm.AllExecutions[0].Status);
+
+        // 5. アプリ種別自動判定("Auto")およびブラウザからExcelへのコピー＆ペースト横断転記とマクロ保存の検証
+        vm.StartEasyRecording();
+        var tCross = DateTimeOffset.UtcNow.AddSeconds(10);
+        var copyEv = recorder.RecordEvent(
+            "Auto", "Copy", null, "table", "売上集計表", "売上集計表", "tbl-sales",
+            "https://example.com/sales", null, null, "品目,金額\nノートPC,150000",
+            logSource: LogSourceConstants.BrowserDom, cssSelector: "#tbl-sales",
+            sourceConfidence: 0.98, windowOrProcessName: "売上管理 - Google Chrome", timestampOverride: tCross);
+        recorder.RecordEvent(
+            "Auto", "WindowActivate", null, null, null, null, null,
+            excelPath, "Orders", "A1:B2", null,
+            logSource: LogSourceConstants.WindowManager,
+            sourceConfidence: 0.85, windowOrProcessName: "Orders.xlsx - Excel", timestampOverride: tCross.AddMilliseconds(300));
+        var pasteHookEv = recorder.RecordEvent(
+            "Auto", "Paste", null, null, null, null, null,
+            null, null, null, null,
+            logSource: LogSourceConstants.OsInputHook, coordinateX: 220, coordinateY: 160,
+            sourceConfidence: 0.4, windowOrProcessName: "Orders.xlsx - Excel", timestampOverride: tCross.AddMilliseconds(450));
+        var writeComEv = recorder.RecordEvent(
+            "Auto", "Write", null, null, null, null, null,
+            excelPath, "Orders", "A1:B2", null,
+            logSource: LogSourceConstants.ExcelCom, coordinateX: 220, coordinateY: 160,
+            sourceConfidence: 0.99, windowOrProcessName: "Orders.xlsx - Excel", timestampOverride: tCross.AddMilliseconds(500));
+
+        await vm.StopEasyRecordingAndGenerateAsync();
+        Assert.Single(vm.EasySteps);
+        Assert.Equal(IrConstants.ActionExcelWriteRange, vm.EasySteps[0].ActionType);
+        Assert.Contains("ノートPC, 150000", vm.EasySteps[0].OperationValueSummary);
+        Assert.Contains(copyEv.EventId, vm.EasySteps[0].UnderlyingNode.SourceCandidateIds!
+            .SelectMany(cid => _repository.GetNormalizedCandidates().Where(c => c.CandidateId == cid).SelectMany(c => c.SourceRawEventIds)));
+        Assert.Contains(pasteHookEv.EventId, vm.EasySteps[0].UnderlyingNode.SourceCandidateIds!
+            .SelectMany(cid => _repository.GetNormalizedCandidates().Where(c => c.CandidateId == cid).SelectMany(c => c.SourceRawEventIds)));
+        Assert.Contains(writeComEv.EventId, vm.EasySteps[0].UnderlyingNode.SourceCandidateIds!
+            .SelectMany(cid => _repository.GetNormalizedCandidates().Where(c => c.CandidateId == cid).SelectMany(c => c.SourceRawEventIds)));
+
+        // 記録終了後にマクロ名を設定して「マクロを保存」を実行し、正式バージョンとして保存・選択されることを検証
+        vm.WorkflowIdInput = "wf-cross-app-saved";
+        vm.WorkflowNameInput = "ブラウザからExcelへの売上転記マクロ";
+        vm.SaveCurrentWorkflowAsVersion();
+        Assert.NotNull(vm.SelectedMacroInList);
+        Assert.Equal("wf-cross-app-saved", vm.SelectedMacroInList!.WorkflowId);
+        Assert.Equal("ブラウザからExcelへの売上転記マクロ", vm.SelectedMacroInList.Name);
     }
 }

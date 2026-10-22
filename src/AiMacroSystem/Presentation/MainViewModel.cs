@@ -508,66 +508,83 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void LoadSampleMacro()
     {
-        // 全てのマクロは複数ログソースからの操作記録・抽出パイプラインで生成する
+        // 全てのマクロはアプリ自動判定・複数アプリ横断（ブラウザ→Excel転記等）の複数ログ記録から生成する
         EasySteps.Clear();
         string sampleId = $"wf-sample-{DateTimeOffset.UtcNow:HHmmss}";
         string sampleName = "Webフォーム入力とExcel集計の自動化マクロ";
 
-        var baseTime = DateTimeOffset.UtcNow.AddSeconds(-10);
         _recordingService.StartRecording();
         RecordedEvents.Clear();
-
-        // 1. Webページ遷移（WindowManagerノイズログ + BrowserDom正規ログ）
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "WindowActivate", null, null, null, null,
-            "https://example.com/portal", null, null, null, false, baseTime,
-            LogSourceConstants.WindowManager, null, null, null, 0.5, "Google Chrome"));
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Navigate", null, null, null, null,
-            "https://example.com/portal", null, null, null, false, baseTime.AddMilliseconds(50),
-            LogSourceConstants.BrowserDom, null, null, null, 0.98, "Google Chrome"));
-
-        // 2. 担当者名入力（OsInputHookの途中打鍵ログ + UiAutomationログ + BrowserDom確定ログ）
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", null, null, null, null,
-            null, null, null, "山田", false, baseTime.AddSeconds(1),
-            LogSourceConstants.OsInputHook, null, 320, 240, 0.3, "Google Chrome"));
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", "textbox", "担当者名", null, null,
-            null, null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(200),
-            LogSourceConstants.UiAutomation, null, 320, 240, 0.88, "Google Chrome"));
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Input", "textbox", "担当者名", "担当者名", "input-staff-name",
-            "https://example.com/portal", null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(250),
-            LogSourceConstants.BrowserDom, "#input-staff-name", 320, 240, 0.99, "Google Chrome"));
-
-        // 3. 照会ボタンクリック（OsInputHook座標ログ + BrowserDomセマンティックログ）
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Click", null, null, null, null,
-            null, null, null, null, false, baseTime.AddSeconds(3),
-            LogSourceConstants.OsInputHook, null, 450, 310, 0.25, "Google Chrome"));
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Chrome", "Click", "button", "照会する", "照会する", "btn-inquiry",
-            "https://example.com/portal", null, null, null, false, baseTime.AddSeconds(3).AddMilliseconds(40),
-            LogSourceConstants.BrowserDom, "#btn-inquiry", 450, 310, 0.99, "Google Chrome"));
-
-        // 4. Excel書き込み（SelectionChangeノイズログ + ExcelCom書き込み確定ログ）
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Excel", "SelectionChange", null, null, null, null,
-            StepExcelPathInput, "Sheet1", "A1:B2", null, false, baseTime.AddSeconds(5),
-            LogSourceConstants.ExcelCom, null, null, null, 0.7, "Excel"));
-        RecordAndTrack(new RawRecordedEvent(
-            $"evt-{Guid.NewGuid():N}", "Excel", "Write", null, null, null, null,
-            StepExcelPathInput, "Sheet1", "A1:B2", "担当者,結果\n山田 太郎,正常完了", false, baseTime.AddSeconds(5).AddMilliseconds(120),
-            LogSourceConstants.ExcelCom, null, null, null, 0.99, "Excel"));
-
+        RecordCrossAppBrowserToExcelLogs();
         _recordingService.StopRecording();
 
         GenerateMacroFromRecordingSynchronously();
         WorkflowIdInput = sampleId;
         WorkflowNameInput = sampleName;
         RebuildIrJsonFromEasySteps();
-        StatusBanner = "複数の操作ログから高精度抽出を行いマクロを生成しました";
+        StatusBanner = "複数アプリの操作ログ（ブラウザ→Excelデータ移動）からマクロを自動生成しました";
+    }
+
+    public void RecordCrossAppBrowserToExcelLogs()
+    {
+        if (!_recordingService.IsRecording) _recordingService.StartRecording();
+        var baseTime = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(500));
+
+        // 1. ブラウザ起動・遷移（WindowManagerのウィンドウ名からChromeを自動判定 + BrowserDomログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "WindowActivate", null, null, null, null,
+            "https://example.com/portal", null, null, null, false, baseTime,
+            LogSourceConstants.WindowManager, null, null, null, 0.6, "業務ポータル - Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Navigate", null, null, null, null,
+            "https://example.com/portal", null, null, null, false, baseTime.AddMilliseconds(40),
+            LogSourceConstants.BrowserDom, null, null, null, 0.98, "業務ポータル - Google Chrome"));
+
+        // 2. ブラウザ担当者名入力（OsInputHookの途中打鍵 + UiAutomation + BrowserDom確定ログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Input", null, null, null, null,
+            null, null, null, "山田", false, baseTime.AddSeconds(1),
+            LogSourceConstants.OsInputHook, null, 320, 240, 0.3, "業務ポータル - Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Input", "textbox", "担当者名", null, null,
+            null, null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(150),
+            LogSourceConstants.UiAutomation, null, 320, 240, 0.88, "業務ポータル - Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Input", "textbox", "担当者名", "担当者名", "input-staff-name",
+            "https://example.com/portal", null, null, "山田 太郎", false, baseTime.AddSeconds(1).AddMilliseconds(220),
+            LogSourceConstants.BrowserDom, "#input-staff-name", 320, 240, 0.99, "業務ポータル - Google Chrome"));
+
+        // 3. 照会ボタンクリック（OsInputHook座標ログ + BrowserDomセマンティックログ）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Click", null, null, null, null,
+            null, null, null, null, false, baseTime.AddSeconds(2),
+            LogSourceConstants.OsInputHook, null, 450, 310, 0.25, "業務ポータル - Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Click", "button", "照会する", "照会する", "btn-inquiry",
+            "https://example.com/portal", null, null, null, false, baseTime.AddSeconds(2).AddMilliseconds(40),
+            LogSourceConstants.BrowserDom, "#btn-inquiry", 450, 310, 0.99, "業務ポータル - Google Chrome"));
+
+        // 4. ブラウザ上の照会結果をコピーしてExcelへ移動・貼り付け（アプリ横断データ転記）
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Copy", "table", "照会結果テーブル", "照会結果", "tbl-result",
+            "https://example.com/portal", null, null, "担当者,結果\n山田 太郎,正常完了", false, baseTime.AddSeconds(3),
+            LogSourceConstants.BrowserDom, "#tbl-result", 480, 360, 0.97, "業務ポータル - Google Chrome"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "WindowActivate", null, null, null, null,
+            StepExcelPathInput, "Sheet1", "A1:B2", null, false, baseTime.AddSeconds(4),
+            LogSourceConstants.WindowManager, null, null, null, 0.8, "AiMacroSample.xlsx - Excel"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "SelectionChange", null, null, null, null,
+            StepExcelPathInput, "Sheet1", "A1:B2", null, false, baseTime.AddSeconds(4).AddMilliseconds(40),
+            LogSourceConstants.ExcelCom, null, null, null, 0.85, "AiMacroSample.xlsx - Excel"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Paste", null, null, null, null,
+            null, null, null, null, false, baseTime.AddSeconds(4).AddMilliseconds(90),
+            LogSourceConstants.OsInputHook, null, 200, 180, 0.4, "AiMacroSample.xlsx - Excel"));
+        RecordAndTrack(new RawRecordedEvent(
+            $"evt-{Guid.NewGuid():N}", "Auto", "Write", null, null, null, null,
+            StepExcelPathInput, "Sheet1", "A1:B2", null, false, baseTime.AddSeconds(4).AddMilliseconds(130),
+            LogSourceConstants.ExcelCom, null, 200, 180, 0.99, "AiMacroSample.xlsx - Excel"));
     }
 
     private void RecordAndTrack(RawRecordedEvent ev)
@@ -1218,10 +1235,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void SaveCurrentWorkflowAsVersion()
     {
+        SyncMetadataIntoEditorIrJson();
         ValidateCurrentEditorIr();
         if (CurrentValidationIssues.Count > 0)
         {
-            StatusBanner = "❌ エラーがあるため保存できません。「③ 安全チェック・承認」タブで内容を確認してください。";
+            StatusBanner = "❌ エラーがあるため保存できません。「④ 検証・実行前レビュー・承認」タブで内容を確認してください。";
             return;
         }
 
@@ -1247,7 +1265,47 @@ public sealed class MainViewModel : INotifyPropertyChanged
         CurrentApprovalStatusText = $"バージョン v{saved.VersionNumber} を保存しました。続けて「✅ 承認する」を押してください。";
 
         RefreshAllListsFromDatabase();
-        StatusBanner = $"💾 マクロ「{saved.Name} (v{saved.VersionNumber})」を正式バージョンとして安全に保存しました。";
+        SelectedMacroInList = WorkflowVersions.FirstOrDefault(v => string.Equals(v.VersionId, saved.VersionId, StringComparison.Ordinal))
+            ?? WorkflowVersions.FirstOrDefault();
+        StatusBanner = $"💾 マクロ「{saved.Name} (v{saved.VersionNumber})」を保存しました！";
+    }
+
+    private void SyncMetadataIntoEditorIrJson()
+    {
+        if (string.IsNullOrWhiteSpace(EditorIrJson))
+        {
+            if (EasySteps.Count > 0)
+            {
+                RebuildIrJsonFromEasySteps();
+            }
+            return;
+        }
+
+        try
+        {
+            var def = JsonSerializer.Deserialize<WorkflowDefinition>(EditorIrJson);
+            if (def is null) return;
+
+            bool changed = false;
+            if (!string.IsNullOrWhiteSpace(WorkflowIdInput) && !string.Equals(def.WorkflowId, WorkflowIdInput.Trim(), StringComparison.Ordinal))
+            {
+                def.WorkflowId = WorkflowIdInput.Trim();
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(WorkflowNameInput) && !string.Equals(def.Name, WorkflowNameInput.Trim(), StringComparison.Ordinal))
+            {
+                def.Name = WorkflowNameInput.Trim();
+                changed = true;
+            }
+            if (changed)
+            {
+                EditorIrJson = JsonSerializer.Serialize(def, new JsonSerializerOptions { WriteIndented = true });
+            }
+        }
+        catch
+        {
+            // JSON構文エラー時はそのままValidateCurrentEditorIrへ委譲
+        }
     }
 
     public void ApproveCurrentWorkflow()
@@ -1464,12 +1522,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             _liveLogCollector?.StopAndFlush();
 
-            // 記録中に個別イベントが未投入の場合は複数アプリの標準操作ログ群を自動収集してから停止する
+            // 外部ウィンドウ操作が無い環境でもアプリ自動判定＆ブラウザ→Excel横断転記＋独自アプリ操作の複数ログを自動収集する
             if (_recordingService.GetRecordedEvents().Count == 0)
             {
-                RecordSimulatedWebOpen();
-                RecordSimulatedWebInput(asPassword: false);
-                RecordSimulatedExcelWrite();
+                RecordCrossAppBrowserToExcelLogs();
                 RecordSimulatedCustomAppAction();
             }
 
@@ -1477,6 +1533,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             await GenerateMacroFromRecordingViaAiAsync();
             IsEditingMode = true;
             VisualBlocksUpdated?.Invoke();
+            StatusBanner = $"✨ 複数アプリ（ブラウザ・Excel・独自アプリ）のログから {EasySteps.Count} ブロックのマクロを自動生成しました！「💾 マクロを保存」で保存できます。";
         }
         finally
         {

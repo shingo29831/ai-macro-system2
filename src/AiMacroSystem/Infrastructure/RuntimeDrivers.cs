@@ -53,6 +53,7 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
     private const int VK_RETURN = 0x0D;
     private const int VK_TAB = 0x09;
     private const int VK_BACK = 0x08;
+    private const int VK_CONTROL = 0x11;
     private const int VK_SPACE = 0x20;
 
     private Timer? _pollTimer;
@@ -67,6 +68,7 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
     private string _lastAppCategory = string.Empty;
     private string _lastAppName = string.Empty;
     private string _lastControlLabel = "入力欄";
+    private string _lastCopiedText = string.Empty;
     private int _lastClickX = 300;
     private int _lastClickY = 200;
     private DateTimeOffset _startedAt;
@@ -141,20 +143,36 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
                 _lastAppCategory = appCategory;
                 _lastAppName = appDisplayName;
 
+                var switchTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(300));
                 if (appCategory == "Chrome")
                 {
                     string navUrl = InferBrowserUrlFromTitle(winTitle);
-                    var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(300));
                     Emit(_recordingService.RecordEvent(
-                        "Chrome", "WindowActivate", null, null, null, null, null,
+                        "Auto", "WindowActivate", null, null, null, null, null,
                         navUrl, null, null, null,
                         logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.6,
-                        windowOrProcessName: appDisplayName, timestampOverride: baseTs));
+                        windowOrProcessName: winTitle, timestampOverride: switchTs));
                     Emit(_recordingService.RecordEvent(
-                        "Chrome", "Navigate", null, null, null, null, null,
+                        "Auto", "Navigate", null, null, null, null, null,
                         navUrl, null, null, null,
                         logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.98,
-                        windowOrProcessName: appDisplayName, timestampOverride: baseTs.AddMilliseconds(25)));
+                        windowOrProcessName: winTitle, timestampOverride: switchTs.AddMilliseconds(25)));
+                }
+                else if (appCategory == "Excel")
+                {
+                    Emit(_recordingService.RecordEvent(
+                        "Auto", "WindowActivate", null, null, null, null, null,
+                        DefaultExcelWorkbookPath, "Sheet1", "A1", null,
+                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
+                        windowOrProcessName: winTitle, timestampOverride: switchTs));
+                }
+                else
+                {
+                    Emit(_recordingService.RecordEvent(
+                        "Auto", "WindowActivate", null, null, null, null, null,
+                        appDisplayName, null, null, null,
+                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
+                        windowOrProcessName: appDisplayName, timestampOverride: switchTs));
                 }
             }
 
@@ -263,6 +281,67 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
 
     private void PollKeyboardInputLocked(string appCategory, string appDisplayName)
     {
+        bool isCtrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        if (isCtrlDown)
+        {
+            // Ctrl+C (アプリ間コピー検出)
+            if (CheckKeyJustPressed('C') && _recordingService is not null)
+            {
+                FlushTypedBufferLocked();
+                string clipText = ReadClipboardTextSafe();
+                if (!string.IsNullOrWhiteSpace(clipText))
+                {
+                    _lastCopiedText = clipText;
+                }
+                var copyTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(250));
+                Emit(_recordingService.RecordEvent(
+                    "Auto", "Copy", null, null, _lastControlLabel, _lastControlLabel, null,
+                    appCategory == "Chrome" ? InferBrowserUrlFromTitle(_lastWindowTitle) : appDisplayName,
+                    null, null, _lastCopiedText,
+                    logSource: appCategory == "Chrome" ? LogSourceConstants.BrowserDom : LogSourceConstants.UiAutomation,
+                    sourceConfidence: 0.95, windowOrProcessName: _lastWindowTitle, timestampOverride: copyTs));
+                return;
+            }
+
+            // Ctrl+V (別アプリやExcel等へのペースト転記検出)
+            if (CheckKeyJustPressed('V') && _recordingService is not null)
+            {
+                FlushTypedBufferLocked();
+                string pasteText = ReadClipboardTextSafe();
+                if (string.IsNullOrWhiteSpace(pasteText))
+                {
+                    pasteText = string.IsNullOrWhiteSpace(_lastCopiedText) ? "転記データ" : _lastCopiedText;
+                }
+                var pasteTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(300));
+                if (appCategory == "Excel")
+                {
+                    string cellAddr = InferCellFromCoordinates(_lastClickX, _lastClickY);
+                    Emit(_recordingService.RecordEvent(
+                        "Auto", "Paste", null, null, null, null, null,
+                        DefaultExcelWorkbookPath, "Sheet1", cellAddr, null,
+                        logSource: LogSourceConstants.OsInputHook, coordinateX: _lastClickX, coordinateY: _lastClickY,
+                        sourceConfidence: 0.4, windowOrProcessName: "Excel", timestampOverride: pasteTs));
+                    Emit(_recordingService.RecordEvent(
+                        "Auto", "Write", null, null, null, null, null,
+                        DefaultExcelWorkbookPath, "Sheet1", cellAddr, pasteText,
+                        logSource: LogSourceConstants.ExcelCom, coordinateX: _lastClickX, coordinateY: _lastClickY,
+                        sourceConfidence: 0.99, windowOrProcessName: "Excel", timestampOverride: pasteTs.AddMilliseconds(35)));
+                }
+                else
+                {
+                    Emit(_recordingService.RecordEvent(
+                        "Auto", "Paste", "text", "textbox", _lastControlLabel, _lastControlLabel, $"paste-{_lastClickX}",
+                        appCategory == "Chrome" ? InferBrowserUrlFromTitle(_lastWindowTitle) : appDisplayName,
+                        null, null, pasteText,
+                        logSource: appCategory == "Chrome" ? LogSourceConstants.BrowserDom : LogSourceConstants.CustomAppHook,
+                        coordinateX: _lastClickX, coordinateY: _lastClickY,
+                        sourceConfidence: 0.98, windowOrProcessName: appDisplayName, timestampOverride: pasteTs));
+                }
+                return;
+            }
+            return;
+        }
+
         // Enter または Tab で入力確定フラッシュ
         if (CheckKeyJustPressed(VK_RETURN) || CheckKeyJustPressed(VK_TAB))
         {
@@ -424,6 +503,36 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
         var sb = new StringBuilder(128);
         int len = GetClassName(hWnd, sb, sb.Capacity);
         return len > 0 ? sb.ToString() : "Control";
+    }
+
+    private static string ReadClipboardTextSafe()
+    {
+        string result = string.Empty;
+        try
+        {
+            var staThread = new Thread(() =>
+            {
+                try
+                {
+                    if (System.Windows.Clipboard.ContainsText())
+                    {
+                        result = System.Windows.Clipboard.GetText() ?? string.Empty;
+                    }
+                }
+                catch
+                {
+                    // クリップボード競合時は無視
+                }
+            });
+            staThread.SetApartmentState(ApartmentState.STA);
+            staThread.Start();
+            staThread.Join(120);
+        }
+        catch
+        {
+            // バックグラウンドスレッドからの取得失敗時は空文字
+        }
+        return result;
     }
 
     private static string GetProcessNameSafe(uint pid)

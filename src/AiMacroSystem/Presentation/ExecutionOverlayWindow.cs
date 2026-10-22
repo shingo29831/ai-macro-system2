@@ -97,7 +97,7 @@ public sealed class ExecutionOverlayWindow : Window
         stopExecBtn.Click += (_, _) => viewModel.CancelActiveMacro();
         _executionButtonsPanel.Children.Add(stopExecBtn);
 
-        // 記録中コントロール群
+        // 記録中コントロール群（操作対象アプリはアプリ側で自動判定するため手動アプリ選択ボタンは配置しない）
         _recordingButtonsPanel = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -106,23 +106,26 @@ public sealed class ExecutionOverlayWindow : Window
             Visibility = Visibility.Collapsed
         };
 
-        var recWebBtn = CreateMiniButton("＋Web操作", Color.FromRgb(51, 65, 85));
-        recWebBtn.Click += (_, _) =>
+        var autoDetectBadge = new Border
         {
-            viewModel.RecordSimulatedWebOpen();
-            viewModel.RecordSimulatedWebInput(asPassword: false);
+            Background = new SolidColorBrush(Color.FromRgb(30, 41, 59)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(100, 116, 139)),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(10, 4, 10, 4),
+            Margin = new Thickness(0, 0, 6, 0),
+            VerticalAlignment = VerticalAlignment.Center
         };
-        _recordingButtonsPanel.Children.Add(recWebBtn);
+        autoDetectBadge.Child = new TextBlock
+        {
+            Text = "自動アプリ判定: ON (複数アプリ横断対応)",
+            Foreground = new SolidColorBrush(Color.FromRgb(226, 232, 240)),
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold
+        };
+        _recordingButtonsPanel.Children.Add(autoDetectBadge);
 
-        var recExcelBtn = CreateMiniButton("＋Excel操作", Color.FromRgb(51, 65, 85));
-        recExcelBtn.Click += (_, _) => viewModel.RecordSimulatedExcelWrite();
-        _recordingButtonsPanel.Children.Add(recExcelBtn);
-
-        var recCustomBtn = CreateMiniButton("＋独自アプリ", Color.FromRgb(51, 65, 85));
-        recCustomBtn.Click += (_, _) => viewModel.RecordSimulatedCustomAppAction();
-        _recordingButtonsPanel.Children.Add(recCustomBtn);
-
-        var finishRecBtn = CreateMiniButton("⏹ 記録終了（自動変換）", Color.FromRgb(220, 38, 38));
+        var finishRecBtn = CreateMiniButton("⏹ 記録終了（自動マクロ変換）", Color.FromRgb(220, 38, 38));
         finishRecBtn.Click += async (_, _) => await viewModel.StopEasyRecordingAndGenerateAsync();
         _recordingButtonsPanel.Children.Add(finishRecBtn);
 
