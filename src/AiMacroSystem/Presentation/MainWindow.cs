@@ -929,6 +929,10 @@ public sealed class MainWindow : Window
         coordCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.AllowCoordinateClickPolicy)));
         settingsStack.Children.Add(coordCheck);
 
+        var launchBrowserCheck = new CheckBox { Content = "Webページ遷移時にシステムの既定ブラウザを起動・前面化する", Margin = new Thickness(0, 0, 0, 6) };
+        launchBrowserCheck.SetBinding(ToggleButton.IsCheckedProperty, new Binding(nameof(MainViewModel.OpenSystemBrowserOnNavigate)));
+        settingsStack.Children.Add(launchBrowserCheck);
+
         settingsScroll.Content = settingsStack;
         settingsCard.Child = settingsScroll;
         Grid.SetColumn(settingsCard, 0);

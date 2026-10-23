@@ -28,6 +28,7 @@ public sealed class ExecutionOverlayWindow : Window
         Background = Brushes.Transparent;
         Topmost = true;
         ShowInTaskbar = false;
+        ShowActivated = false;
 
         PositionAtTopCenter();
 

@@ -47,14 +47,26 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
     private static extern IntPtr WindowFromPoint(POINT point);
 
     [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
     private static extern int GetDlgCtrlID(IntPtr hwndCtl);
 
+    private const uint GA_ROOT = 2;
     private const int VK_LBUTTON = 0x01;
     private const int VK_RETURN = 0x0D;
     private const int VK_TAB = 0x09;
     private const int VK_BACK = 0x08;
+    private const int VK_SHIFT = 0x10;
     private const int VK_CONTROL = 0x11;
     private const int VK_SPACE = 0x20;
+    private const int VK_OEM_1 = 0xBA;
+    private const int VK_OEM_PLUS = 0xBB;
+    private const int VK_OEM_COMMA = 0xBC;
+    private const int VK_OEM_MINUS = 0xBD;
+    private const int VK_OEM_PERIOD = 0xBE;
+    private const int VK_OEM_2 = 0xBF;
+    private const int VK_OEM_3 = 0xC0;
 
     private Timer? _pollTimer;
     private RecordingService? _recordingService;
@@ -89,7 +101,7 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             _startedAt = DateTimeOffset.UtcNow;
 
             _pollTimer?.Dispose();
-            _pollTimer = new Timer(PollTick, null, TimeSpan.FromMilliseconds(120), TimeSpan.FromMilliseconds(45));
+            _pollTimer = new Timer(PollTick, null, TimeSpan.FromMilliseconds(80), TimeSpan.FromMilliseconds(25));
         }
     }
 
@@ -100,6 +112,22 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             _pollTimer?.Dispose();
             _pollTimer = null;
             FlushTypedBufferLocked();
+
+            // ウィンドウ切替のみで個別クリック・打鍵が未記録だった場合は対象画面への遷移イベントを補完する
+            if (_recordingService is not null &&
+                _recordingService.IsRecording &&
+                _lastAppCategory == "Chrome" &&
+                !_recordingService.GetRecordedEvents().Any(e =>
+                    e.EventKind is "Click" or "Input" or "Write" or "Paste" or "Navigate" or "Submit"))
+            {
+                var navTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(100));
+                string navUrl = InferBrowserUrlFromTitle(_lastWindowTitle);
+                Emit(_recordingService.RecordEvent(
+                    "Chrome", "Navigate", null, null, null, null, null,
+                    navUrl, null, null, null,
+                    logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.98,
+                    windowOrProcessName: _lastWindowTitle, timestampOverride: navTs));
+            }
         }
     }
 
@@ -117,6 +145,35 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
                 return;
             }
 
+            // マウス左クリックを先に判定し、オーバーレイ表示直後の外部ウィンドウクリック取りこぼしを防ぐ
+            bool isLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+            if (isLeftDown && !_wasLeftDown && (DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds > 150)
+            {
+                if (GetCursorPos(out POINT pt))
+                {
+                    IntPtr targetHwnd = WindowFromPoint(pt);
+                    if (targetHwnd != IntPtr.Zero)
+                    {
+                        GetWindowThreadProcessId(targetHwnd, out uint targetPid);
+                        if (targetPid != 0 && targetPid != (uint)Environment.ProcessId)
+                        {
+                            IntPtr rootHwnd = GetAncestor(targetHwnd, GA_ROOT);
+                            if (rootHwnd == IntPtr.Zero) rootHwnd = targetHwnd;
+                            string clickWinTitle = ReadWindowTextSafe(rootHwnd);
+                            string clickProcName = GetProcessNameSafe(targetPid);
+                            var (clickCategory, clickAppName) = ClassifyApplication(clickProcName, clickWinTitle);
+
+                            EnsureWindowContextRecordedLocked(clickCategory, clickAppName, clickWinTitle);
+                            FlushTypedBufferLocked();
+                            _lastClickX = pt.X;
+                            _lastClickY = pt.Y;
+                            RecordMouseClickMultiLogsLocked(targetHwnd, clickCategory, clickAppName, clickWinTitle, pt);
+                        }
+                    }
+                }
+            }
+            _wasLeftDown = isLeftDown;
+
             IntPtr fgHwnd = GetForegroundWindow();
             if (fgHwnd == IntPtr.Zero)
             {
@@ -124,10 +181,8 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             }
 
             GetWindowThreadProcessId(fgHwnd, out uint pid);
-            if (pid == (uint)Environment.ProcessId)
+            if (pid == 0 || pid == (uint)Environment.ProcessId)
             {
-                // 自身のオーバーレイウィンドウ上の操作は記録対象から除外する
-                _wasLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
                 return;
             }
 
@@ -135,65 +190,7 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             string procName = GetProcessNameSafe(pid);
             var (appCategory, appDisplayName) = ClassifyApplication(procName, winTitle);
 
-            if (!string.IsNullOrWhiteSpace(winTitle) &&
-                !string.Equals(winTitle, _lastWindowTitle, StringComparison.Ordinal))
-            {
-                FlushTypedBufferLocked();
-                _lastWindowTitle = winTitle;
-                _lastAppCategory = appCategory;
-                _lastAppName = appDisplayName;
-
-                var switchTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(300));
-                if (appCategory == "Chrome")
-                {
-                    string navUrl = InferBrowserUrlFromTitle(winTitle);
-                    Emit(_recordingService.RecordEvent(
-                        "Auto", "WindowActivate", null, null, null, null, null,
-                        navUrl, null, null, null,
-                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.6,
-                        windowOrProcessName: winTitle, timestampOverride: switchTs));
-                    Emit(_recordingService.RecordEvent(
-                        "Auto", "Navigate", null, null, null, null, null,
-                        navUrl, null, null, null,
-                        logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.98,
-                        windowOrProcessName: winTitle, timestampOverride: switchTs.AddMilliseconds(25)));
-                }
-                else if (appCategory == "Excel")
-                {
-                    Emit(_recordingService.RecordEvent(
-                        "Auto", "WindowActivate", null, null, null, null, null,
-                        DefaultExcelWorkbookPath, "Sheet1", "A1", null,
-                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
-                        windowOrProcessName: winTitle, timestampOverride: switchTs));
-                }
-                else
-                {
-                    Emit(_recordingService.RecordEvent(
-                        "Auto", "WindowActivate", null, null, null, null, null,
-                        appDisplayName, null, null, null,
-                        logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
-                        windowOrProcessName: appDisplayName, timestampOverride: switchTs));
-                }
-            }
-
-            // マウス左クリック検出
-            bool isLeftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-            if (isLeftDown && !_wasLeftDown && (DateTimeOffset.UtcNow - _startedAt).TotalMilliseconds > 200)
-            {
-                if (GetCursorPos(out POINT pt))
-                {
-                    IntPtr targetHwnd = WindowFromPoint(pt);
-                    GetWindowThreadProcessId(targetHwnd, out uint targetPid);
-                    if (targetPid != (uint)Environment.ProcessId)
-                    {
-                        FlushTypedBufferLocked();
-                        _lastClickX = pt.X;
-                        _lastClickY = pt.Y;
-                        RecordMouseClickMultiLogsLocked(targetHwnd, appCategory, appDisplayName, winTitle, pt);
-                    }
-                }
-            }
-            _wasLeftDown = isLeftDown;
+            EnsureWindowContextRecordedLocked(appCategory, appDisplayName, winTitle);
 
             // キーボード打鍵検出
             PollKeyboardInputLocked(appCategory, appDisplayName);
@@ -205,6 +202,59 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
         finally
         {
             Monitor.Exit(_sync);
+        }
+    }
+
+    private void EnsureWindowContextRecordedLocked(string appCategory, string appDisplayName, string winTitle)
+    {
+        _lastAppCategory = appCategory;
+        _lastAppName = appDisplayName;
+
+        if (_recordingService is null || string.IsNullOrWhiteSpace(winTitle) ||
+            string.Equals(winTitle, _lastWindowTitle, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        FlushTypedBufferLocked();
+        _lastWindowTitle = winTitle;
+
+        var switchTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(200));
+        if (appCategory == "Chrome")
+        {
+            string navUrl = InferBrowserUrlFromTitle(winTitle);
+            Emit(_recordingService.RecordEvent(
+                "Auto", "WindowActivate", null, null, null, null, null,
+                navUrl, null, null, null,
+                logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.6,
+                windowOrProcessName: winTitle, timestampOverride: switchTs));
+
+            // タイトル自体が明示的なURLである場合のみNavigateを発行し、既存タブ操作時の誤遷移を防ぐ
+            if (Uri.TryCreate(winTitle.Trim(), UriKind.Absolute, out Uri? explicitUri) &&
+                (explicitUri.Scheme == "https" || explicitUri.Scheme == "http"))
+            {
+                Emit(_recordingService.RecordEvent(
+                    "Auto", "Navigate", null, null, null, null, null,
+                    explicitUri.ToString(), null, null, null,
+                    logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.98,
+                    windowOrProcessName: winTitle, timestampOverride: switchTs.AddMilliseconds(25)));
+            }
+        }
+        else if (appCategory == "Excel")
+        {
+            Emit(_recordingService.RecordEvent(
+                "Auto", "WindowActivate", null, null, null, null, null,
+                DefaultExcelWorkbookPath, "Sheet1", "A1", null,
+                logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
+                windowOrProcessName: winTitle, timestampOverride: switchTs));
+        }
+        else
+        {
+            Emit(_recordingService.RecordEvent(
+                "Auto", "WindowActivate", null, null, null, null, null,
+                appDisplayName, null, null, null,
+                logSource: LogSourceConstants.WindowManager, sourceConfidence: 0.85,
+                windowOrProcessName: appDisplayName, timestampOverride: switchTs));
         }
     }
 
@@ -221,10 +271,17 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
         string className = ReadClassNameSafe(targetHwnd);
         int ctrlId = GetDlgCtrlID(targetHwnd);
 
-        string elementLabel = !string.IsNullOrWhiteSpace(ctrlText) && ctrlText.Length <= 40
+        // Chromiumの内部描画HWND名("Chrome Legacy Window")は要素名ではなく座標付き識別子へ変換する
+        bool isGenericBrowserSurface = appCategory == "Chrome" ||
+            ctrlText.Contains("Chrome Legacy Window", StringComparison.OrdinalIgnoreCase) ||
+            className.StartsWith("Chrome_", StringComparison.OrdinalIgnoreCase);
+
+        string elementLabel = !isGenericBrowserSurface && !string.IsNullOrWhiteSpace(ctrlText) && ctrlText.Length <= 40
             ? ctrlText.Trim()
-            : $"{appDisplayName} ボタン({pt.X},{pt.Y})";
-        string stableId = ctrlId > 0 ? $"ctrl-{ctrlId}" : $"el-{Math.Abs(className.GetHashCode()) % 10000}-{pt.X}-{pt.Y}";
+            : $"{appDisplayName} 要素({pt.X},{pt.Y})";
+        string stableId = (!isGenericBrowserSurface && ctrlId > 0)
+            ? $"ctrl-{ctrlId}-{pt.X}-{pt.Y}"
+            : $"el-{Math.Abs(className.GetHashCode()) % 10000}-{pt.X}-{pt.Y}";
         _lastControlLabel = elementLabel;
 
         var baseTs = _recordingService.AdvanceLogicalClock(TimeSpan.FromMilliseconds(350));
@@ -360,6 +417,8 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             _typedBuffer.Append(' ');
         }
 
+        bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
         for (int vk = '0'; vk <= '9'; vk++)
         {
             if (CheckKeyJustPressed(vk))
@@ -368,15 +427,30 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
             }
         }
 
+        for (int vk = 0x60; vk <= 0x69; vk++)
+        {
+            if (CheckKeyJustPressed(vk))
+            {
+                _typedBuffer.Append((char)('0' + (vk - 0x60)));
+            }
+        }
+
         for (int vk = 'A'; vk <= 'Z'; vk++)
         {
             if (CheckKeyJustPressed(vk))
             {
-                _typedBuffer.Append((char)vk);
-                _lastAppCategory = appCategory;
-                _lastAppName = appDisplayName;
+                char ch = isShiftDown ? (char)vk : char.ToLowerInvariant((char)vk);
+                _typedBuffer.Append(ch);
             }
         }
+
+        if (CheckKeyJustPressed(VK_OEM_MINUS)) _typedBuffer.Append(isShiftDown ? '_' : '-');
+        if (CheckKeyJustPressed(VK_OEM_PERIOD)) _typedBuffer.Append('.');
+        if (CheckKeyJustPressed(VK_OEM_COMMA)) _typedBuffer.Append(',');
+        if (CheckKeyJustPressed(VK_OEM_2)) _typedBuffer.Append(isShiftDown ? '?' : '/');
+        if (CheckKeyJustPressed(VK_OEM_1)) _typedBuffer.Append(isShiftDown ? '*' : ':');
+        if (CheckKeyJustPressed(VK_OEM_PLUS)) _typedBuffer.Append(isShiftDown ? '+' : ';');
+        if (CheckKeyJustPressed(VK_OEM_3)) _typedBuffer.Append('@');
     }
 
     private bool CheckKeyJustPressed(int vk)
@@ -549,6 +623,316 @@ public sealed class WindowsLiveLogMonitor : ILiveOperationLogCollector
     }
 }
 
+internal static class WindowsOsAutomation
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public uint type;
+        public INPUTUNION U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION
+    {
+        [FieldOffset(0)]
+        public MOUSEINPUT mi;
+        [FieldOffset(0)]
+        public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    private const int SW_RESTORE = 9;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_UNICODE = 0x0004;
+
+    private static readonly Regex _coordInTextRegex = new(@"\((\d+)\s*,\s*(\d+)\)|-(\d+)-(\d+)$", RegexOptions.Compiled);
+
+    public static IntPtr FindBrowserWindow()
+    {
+        IntPtr fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero && IsBrowserWindow(fg))
+        {
+            return fg;
+        }
+
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            if (IsBrowserWindow(hWnd))
+            {
+                found = hWnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    public static IntPtr FindCustomAppWindow(string applicationName)
+    {
+        if (string.IsNullOrWhiteSpace(applicationName)) return IntPtr.Zero;
+        string target = applicationName.Trim();
+
+        IntPtr fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero && MatchesAppWindow(fg, target))
+        {
+            return fg;
+        }
+
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((hWnd, _) =>
+        {
+            if (!IsWindowVisible(hWnd)) return true;
+            if (MatchesAppWindow(hWnd, target))
+            {
+                found = hWnd;
+                return false;
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    public static async Task<IntPtr> ActivateWindowAsync(IntPtr hWnd, CancellationToken ct)
+    {
+        if (hWnd == IntPtr.Zero) return IntPtr.Zero;
+        try
+        {
+            if (IsIconic(hWnd))
+            {
+                ShowWindow(hWnd, SW_RESTORE);
+            }
+            if (GetForegroundWindow() != hWnd)
+            {
+                SetForegroundWindow(hWnd);
+                await Task.Delay(120, ct);
+            }
+        }
+        catch
+        {
+            // OS権限により前面化できない場合も後続の入力送出を継続
+        }
+        return hWnd;
+    }
+
+    public static bool TryResolveCoordinates(SemanticLocator locator, out int x, out int y)
+    {
+        if (locator.CoordinateX.HasValue && locator.CoordinateY.HasValue)
+        {
+            x = locator.CoordinateX.Value;
+            y = locator.CoordinateY.Value;
+            return true;
+        }
+
+        string?[] candidates = { locator.Label, locator.AccessibleName, locator.StableId, locator.CssSelector };
+        foreach (string? text in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(text)) continue;
+            var match = _coordInTextRegex.Match(text);
+            if (match.Success)
+            {
+                string gx = !string.IsNullOrEmpty(match.Groups[1].Value) ? match.Groups[1].Value : match.Groups[3].Value;
+                string gy = !string.IsNullOrEmpty(match.Groups[2].Value) ? match.Groups[2].Value : match.Groups[4].Value;
+                if (int.TryParse(gx, out x) && int.TryParse(gy, out y))
+                {
+                    return true;
+                }
+            }
+        }
+
+        x = 0;
+        y = 0;
+        return false;
+    }
+
+    public static bool TryGetWindowCenter(IntPtr hWnd, out int x, out int y)
+    {
+        if (hWnd != IntPtr.Zero && GetWindowRect(hWnd, out RECT rect) && rect.Right > rect.Left && rect.Bottom > rect.Top)
+        {
+            x = rect.Left + (rect.Right - rect.Left) / 2;
+            y = rect.Top + (rect.Bottom - rect.Top) / 2;
+            return true;
+        }
+        x = 0;
+        y = 0;
+        return false;
+    }
+
+    public static async Task MoveAndLeftClickAsync(int x, int y, CancellationToken ct)
+    {
+        SetCursorPos(x, y);
+        await Task.Delay(60, ct);
+        mouse_event(MOUSEEVENTF_LEFTDOWN, x, y, 0, UIntPtr.Zero);
+        await Task.Delay(35, ct);
+        mouse_event(MOUSEEVENTF_LEFTUP, x, y, 0, UIntPtr.Zero);
+        await Task.Delay(80, ct);
+    }
+
+    public static async Task SendUnicodeTextAsync(string text, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+
+        var inputs = new List<INPUT>(text.Length * 2);
+        foreach (char ch in text)
+        {
+            inputs.Add(new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new INPUTUNION
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE
+                    }
+                }
+            });
+            inputs.Add(new INPUT
+            {
+                type = INPUT_KEYBOARD,
+                U = new INPUTUNION
+                {
+                    ki = new KEYBDINPUT
+                    {
+                        wVk = 0,
+                        wScan = ch,
+                        dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                    }
+                }
+            });
+        }
+
+        INPUT[] arr = inputs.ToArray();
+        SendInput((uint)arr.Length, arr, Marshal.SizeOf<INPUT>());
+        await Task.Delay(80, ct);
+    }
+
+    private static bool IsBrowserWindow(IntPtr hWnd)
+    {
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        if (pid == 0 || pid == (uint)Environment.ProcessId) return false;
+
+        string procName = GetProcessNameSafe(pid);
+        string title = ReadWindowTextSafe(hWnd);
+        if (string.IsNullOrWhiteSpace(title)) return false;
+
+        return procName.Equals("chrome", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("msedge", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("firefox", StringComparison.OrdinalIgnoreCase) ||
+               procName.Equals("brave", StringComparison.OrdinalIgnoreCase) ||
+               title.Contains("Google Chrome", StringComparison.OrdinalIgnoreCase) ||
+               title.Contains("Microsoft Edge", StringComparison.OrdinalIgnoreCase) ||
+               title.Contains("Mozilla Firefox", StringComparison.OrdinalIgnoreCase) ||
+               title.Contains("Brave", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesAppWindow(IntPtr hWnd, string targetAppName)
+    {
+        GetWindowThreadProcessId(hWnd, out uint pid);
+        if (pid == 0 || pid == (uint)Environment.ProcessId) return false;
+
+        string procName = GetProcessNameSafe(pid);
+        string title = ReadWindowTextSafe(hWnd);
+        if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(procName)) return false;
+
+        return title.Contains(targetAppName, StringComparison.OrdinalIgnoreCase) ||
+               procName.Contains(targetAppName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string ReadWindowTextSafe(IntPtr hWnd)
+    {
+        var sb = new StringBuilder(256);
+        int len = GetWindowText(hWnd, sb, sb.Capacity);
+        return len > 0 ? sb.ToString() : string.Empty;
+    }
+
+    private static string GetProcessNameSafe(uint pid)
+    {
+        try
+        {
+            using var proc = Process.GetProcessById((int)pid);
+            return proc.ProcessName ?? string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+}
+
 public sealed class LiveChromeBrowserDriver : IBrowserDriver
 {
     private readonly Dictionary<string, string> _fieldValues = new(StringComparer.OrdinalIgnoreCase);
@@ -556,8 +940,9 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
 
     public Uri? CurrentUrl { get; private set; }
     public bool LaunchSystemBrowserOnNavigate { get; set; }
+    public bool EnableOsAutomation { get; set; }
 
-    public Task<(IReadOnlyList<Uri> RedirectChain, Uri FinalUrl, IReadOnlyList<Uri> OpenedPopups)> NavigateAsync(
+    public async Task<(IReadOnlyList<Uri> RedirectChain, Uri FinalUrl, IReadOnlyList<Uri> OpenedPopups)> NavigateAsync(
         Uri targetUrl,
         CancellationToken ct)
     {
@@ -566,17 +951,34 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
         _activeStateSelectors.Add("body");
         _activeStateSelectors.Add("#main");
 
-        if (LaunchSystemBrowserOnNavigate &&
+        if ((LaunchSystemBrowserOnNavigate || EnableOsAutomation) &&
             (targetUrl.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
              targetUrl.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)))
         {
             try
             {
-                Process.Start(new ProcessStartInfo
+                IntPtr existingBrowser = WindowsOsAutomation.FindBrowserWindow();
+                bool isDefaultFallbackUrl = targetUrl.Host.Equals("example.com", StringComparison.OrdinalIgnoreCase) &&
+                                            targetUrl.AbsolutePath.Equals("/portal", StringComparison.OrdinalIgnoreCase);
+
+                if (existingBrowser != IntPtr.Zero && isDefaultFallbackUrl)
                 {
-                    FileName = targetUrl.ToString(),
-                    UseShellExecute = true
-                });
+                    await WindowsOsAutomation.ActivateWindowAsync(existingBrowser, ct);
+                }
+                else if (LaunchSystemBrowserOnNavigate)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = targetUrl.ToString(),
+                        UseShellExecute = true
+                    });
+                    await Task.Delay(500, ct);
+                    IntPtr launched = WindowsOsAutomation.FindBrowserWindow();
+                    if (launched != IntPtr.Zero)
+                    {
+                        await WindowsOsAutomation.ActivateWindowAsync(launched, ct);
+                    }
+                }
             }
             catch
             {
@@ -586,7 +988,7 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
 
         IReadOnlyList<Uri> redirects = Array.Empty<Uri>();
         IReadOnlyList<Uri> popups = Array.Empty<Uri>();
-        return Task.FromResult((redirects, targetUrl, popups));
+        return (redirects, targetUrl, popups);
     }
 
     public Task<int> CountMatchingElementsAsync(SemanticLocator locator, CancellationToken ct)
@@ -599,22 +1001,56 @@ public sealed class LiveChromeBrowserDriver : IBrowserDriver
         return Task.FromResult(0);
     }
 
-    public Task ClickElementAsync(SemanticLocator locator, CancellationToken ct)
+    public async Task ClickElementAsync(SemanticLocator locator, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        if (EnableOsAutomation)
+        {
+            IntPtr browserHwnd = WindowsOsAutomation.FindBrowserWindow();
+            if (browserHwnd != IntPtr.Zero)
+            {
+                await WindowsOsAutomation.ActivateWindowAsync(browserHwnd, ct);
+            }
+
+            if (WindowsOsAutomation.TryResolveCoordinates(locator, out int x, out int y))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(x, y, ct);
+            }
+            else if (browserHwnd != IntPtr.Zero && WindowsOsAutomation.TryGetWindowCenter(browserHwnd, out int cx, out int cy))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(cx, cy, ct);
+            }
+        }
+
         string key = GetLocatorKey(locator);
         _activeStateSelectors.Add($"#clicked-{key}");
         _activeStateSelectors.Add("#submit-success");
         _activeStateSelectors.Add(".complete-message");
-        return Task.CompletedTask;
     }
 
-    public Task FillElementAsync(SemanticLocator locator, string value, CancellationToken ct)
+    public async Task FillElementAsync(SemanticLocator locator, string value, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        if (EnableOsAutomation)
+        {
+            IntPtr browserHwnd = WindowsOsAutomation.FindBrowserWindow();
+            if (browserHwnd != IntPtr.Zero)
+            {
+                await WindowsOsAutomation.ActivateWindowAsync(browserHwnd, ct);
+            }
+
+            if (WindowsOsAutomation.TryResolveCoordinates(locator, out int x, out int y))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(x, y, ct);
+            }
+
+            await WindowsOsAutomation.SendUnicodeTextAsync(value, ct);
+        }
+
         string key = GetLocatorKey(locator);
         _fieldValues[key] = value;
-        return Task.CompletedTask;
     }
 
     public Task<string?> ReadElementValueAsync(SemanticLocator locator, CancellationToken ct)
@@ -642,6 +1078,8 @@ public sealed class LiveCustomAppDriver : ICustomAppDriver
 {
     private readonly Dictionary<string, string> _controlValues = new(StringComparer.OrdinalIgnoreCase);
 
+    public bool EnableOsAutomation { get; set; }
+
     public Task<bool> WindowExistsAsync(string applicationName, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
@@ -658,20 +1096,54 @@ public sealed class LiveCustomAppDriver : ICustomAppDriver
         return Task.FromResult(locator.HasSemanticTarget() || locator.UsesCoordinatesOnly() ? 1 : 0);
     }
 
-    public Task ClickControlAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
+    public async Task ClickControlAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        if (EnableOsAutomation)
+        {
+            IntPtr appHwnd = WindowsOsAutomation.FindCustomAppWindow(applicationName);
+            if (appHwnd != IntPtr.Zero)
+            {
+                await WindowsOsAutomation.ActivateWindowAsync(appHwnd, ct);
+            }
+
+            if (WindowsOsAutomation.TryResolveCoordinates(locator, out int x, out int y))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(x, y, ct);
+            }
+            else if (appHwnd != IntPtr.Zero && WindowsOsAutomation.TryGetWindowCenter(appHwnd, out int cx, out int cy))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(cx, cy, ct);
+            }
+        }
+
         string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
         _controlValues[$"{key}::clicked"] = "true";
-        return Task.CompletedTask;
     }
 
-    public Task FillControlAsync(string applicationName, SemanticLocator locator, string value, CancellationToken ct)
+    public async Task FillControlAsync(string applicationName, SemanticLocator locator, string value, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+
+        if (EnableOsAutomation)
+        {
+            IntPtr appHwnd = WindowsOsAutomation.FindCustomAppWindow(applicationName);
+            if (appHwnd != IntPtr.Zero)
+            {
+                await WindowsOsAutomation.ActivateWindowAsync(appHwnd, ct);
+            }
+
+            if (WindowsOsAutomation.TryResolveCoordinates(locator, out int x, out int y))
+            {
+                await WindowsOsAutomation.MoveAndLeftClickAsync(x, y, ct);
+            }
+
+            await WindowsOsAutomation.SendUnicodeTextAsync(value, ct);
+        }
+
         string key = $"{applicationName}::{locator.ResolveByPriority().Key}";
         _controlValues[key] = value;
-        return Task.CompletedTask;
     }
 
     public Task<string?> ReadControlTextAsync(string applicationName, SemanticLocator locator, CancellationToken ct)
@@ -854,7 +1326,7 @@ public sealed class LiveExcelDriver : IExcelComDriver
                     sb.AppendLine(string.Join(",", rowVals));
                 }
             }
-            File.WriteAllText(csvPath, sb.ToString(), Encoding.UTF8);
+                File.WriteAllText(csvPath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
         }
         catch
         {

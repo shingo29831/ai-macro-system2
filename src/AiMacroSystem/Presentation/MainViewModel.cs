@@ -130,6 +130,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _aiOrchestrator = aiOrchestrator;
         _liveBrowserDriver = liveBrowserDriver;
         _liveLogCollector = liveLogCollector;
+        if (_liveBrowserDriver is not null)
+        {
+            _openSystemBrowserOnNavigate = _liveBrowserDriver.LaunchSystemBrowserOnNavigate;
+        }
     }
 
     public ObservableCollection<WorkflowVersionRecord> WorkflowVersions { get; } = new();
@@ -464,6 +468,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public async Task ExecuteSelectedMacroFromListAsync()
     {
+        // 記録または編集直後で未保存のステップがある場合は上書きせず正式版として保存してから実行する
+        if (_currentSavedVersionId is null && EasySteps.Count > 0)
+        {
+            SaveCurrentWorkflowAsVersion();
+        }
+
         var target = SelectedMacroInList ?? WorkflowVersions.FirstOrDefault();
         if (target is null)
         {
@@ -749,6 +759,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         var preservedCandidateIds = SelectedStepForEdit.UnderlyingNode.SourceCandidateIds;
+        var preservedLocator = ExtractLocatorFromNode(SelectedStepForEdit.UnderlyingNode);
         var updatedItem = CreateStepItemFromInputs(
             index + 1,
             SelectedActionKind,
@@ -760,7 +771,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             StepExcelSheetInput,
             StepExcelRangeInput,
             StepExcelWriteTextInput,
-            preservedCandidateIds);
+            preservedCandidateIds,
+            preservedLocator);
 
         updatedItem.IsSelectedForEdit = true;
         EasySteps[index] = updatedItem;
@@ -838,6 +850,34 @@ public sealed class MainViewModel : INotifyPropertyChanged
         EasySteps.Add(item);
     }
 
+    private static SemanticLocator? ExtractLocatorFromNode(WorkflowNode node)
+    {
+        if (!node.Args.HasValue) return null;
+        JsonElement args = node.Args.Value;
+        return node.ActionType switch
+        {
+            IrConstants.ActionChromeFill => args.Deserialize<ChromeFillArgs>()?.Locator,
+            IrConstants.ActionChromeClick => args.Deserialize<ChromeClickArgs>()?.Locator,
+            IrConstants.ActionChromeSubmit => args.Deserialize<ChromeSubmitArgs>()?.Locator,
+            IrConstants.ActionCustomAppClick => args.Deserialize<CustomAppClickArgs>()?.Locator,
+            IrConstants.ActionCustomAppFill => args.Deserialize<CustomAppFillArgs>()?.Locator,
+            IrConstants.ActionCustomAppReadText => args.Deserialize<CustomAppReadTextArgs>()?.Locator,
+            _ => null
+        };
+    }
+
+    private static SemanticLocator MergeLocatorWithPreservedMetadata(string role, string safeElem, SemanticLocator? preserved) =>
+        new()
+        {
+            Role = role,
+            AccessibleName = safeElem,
+            Label = safeElem,
+            StableId = preserved?.StableId,
+            CssSelector = preserved?.CssSelector,
+            CoordinateX = preserved?.CoordinateX,
+            CoordinateY = preserved?.CoordinateY
+        };
+
     private EasyStepItem CreateStepItemFromInputs(
         int stepNumber,
         string actionKind,
@@ -849,7 +889,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         string sheet,
         string range,
         string excelText,
-        List<string>? sourceCandidateIds)
+        List<string>? sourceCandidateIds,
+        SemanticLocator? preservedLocator = null)
     {
         string customAppName = string.IsNullOrWhiteSpace(StepCustomAppNameInput) ? "基幹業務システム" : StepCustomAppNameInput.Trim();
         string safeElem = string.IsNullOrWhiteSpace(elementName) ? "対象要素" : elementName.Trim();
@@ -880,7 +921,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
                     {
-                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = safeElem, Label = safeElem },
+                        Locator = MergeLocatorWithPreservedMetadata("textbox", safeElem, preservedLocator),
                         Value = isSens ? SensitiveDataProtector.RedactedPlaceholder : fillVal,
                         IsSensitive = isSens
                     })
@@ -896,7 +937,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeClickArgs
                     {
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem }
+                        Locator = MergeLocatorWithPreservedMetadata("button", safeElem, preservedLocator)
                     })
                 };
                 break;
@@ -910,7 +951,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     SourceCandidateIds = sourceCandidateIds,
                     Args = JsonSerializer.SerializeToElement(new ChromeSubmitArgs
                     {
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem },
+                        Locator = MergeLocatorWithPreservedMetadata("button", safeElem, preservedLocator),
                         DestinationUrl = safeUrl,
                         ExpectedSuccessSelector = "#submit-success"
                     })
@@ -943,7 +984,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Args = JsonSerializer.SerializeToElement(new CustomAppClickArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "button", AccessibleName = safeElem, Label = safeElem }
+                        Locator = MergeLocatorWithPreservedMetadata("button", safeElem, preservedLocator)
                     })
                 };
                 break;
@@ -958,7 +999,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Args = JsonSerializer.SerializeToElement(new CustomAppFillArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "textbox", AccessibleName = safeElem, Label = safeElem },
+                        Locator = MergeLocatorWithPreservedMetadata("textbox", safeElem, preservedLocator),
                         Value = isSens ? SensitiveDataProtector.RedactedPlaceholder : fillVal,
                         IsSensitive = isSens
                     })
@@ -975,7 +1016,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                     Args = JsonSerializer.SerializeToElement(new CustomAppReadTextArgs
                     {
                         ApplicationName = customAppName,
-                        Locator = new SemanticLocator { Role = "text", AccessibleName = safeElem, Label = safeElem }
+                        Locator = MergeLocatorWithPreservedMetadata("text", safeElem, preservedLocator)
                     })
                 };
                 break;
@@ -1416,6 +1457,11 @@ public sealed class MainViewModel : INotifyPropertyChanged
             IsExecutingMacro = true;
             RunningProgressText = $"実行中: {WorkflowNameInput} (全 {EasySteps.Count} ブロック)";
             StatusBanner = "🚀 マクロを実行中です...";
+            if (_liveBrowserDriver?.EnableOsAutomation == true)
+            {
+                // メイン画面が非表示になり対象アプリが前面化されるまで待機する
+                await Task.Delay(180);
+            }
             var execRecord = await _executionEngine.ExecuteWorkflowVersionAsync(_currentSavedVersionId, _currentApprovalId);
             _activeRunningExecutionId = null;
 
@@ -1812,15 +1858,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
             case IrConstants.ActionChromeFill:
             {
                 var a = args.Deserialize<ChromeFillArgs>();
-                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
+                var loc = a?.Locator ?? new SemanticLocator();
+                var (strategy, key) = loc.ResolveByPriority();
+                string coordInfo = loc.CoordinateX.HasValue && loc.CoordinateY.HasValue ? $" [座標: ({loc.CoordinateX},{loc.CoordinateY})]" : "";
                 string val = a?.IsSensitive == true ? "[REDACTED] (機密保護)" : (a?.Value ?? string.Empty);
-                return ("Chrome ブラウザ", $"要素: {key} ({strategy})", $"入力値: 「{val}」");
+                return ("Chrome ブラウザ", $"要素: {key} ({strategy}){coordInfo}", $"入力値: 「{val}」");
             }
             case IrConstants.ActionChromeClick:
             {
                 var a = args.Deserialize<ChromeClickArgs>();
-                var (strategy, key) = (a?.Locator ?? new SemanticLocator()).ResolveByPriority();
-                return ("Chrome ブラウザ", $"要素: {key} ({strategy})", "クリック操作・一意性検証");
+                var loc = a?.Locator ?? new SemanticLocator();
+                var (strategy, key) = loc.ResolveByPriority();
+                string coordInfo = loc.CoordinateX.HasValue && loc.CoordinateY.HasValue ? $" [座標: ({loc.CoordinateX},{loc.CoordinateY})]" : "";
+                return ("Chrome ブラウザ", $"要素: {key} ({strategy}){coordInfo}", "クリック操作・一意性検証");
             }
             case IrConstants.ActionChromeSubmit:
             {

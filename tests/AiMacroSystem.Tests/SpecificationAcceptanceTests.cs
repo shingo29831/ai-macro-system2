@@ -882,12 +882,15 @@ public sealed class SpecificationAcceptanceTests : IDisposable
         Assert.Contains("社内受注管理システム", vm.EasySteps[3].TargetAppBadge);
         Assert.Contains("ABC-999", vm.EasySteps[3].OperationValueSummary);
 
-        // 作成済みマクロの既存ビジュアルブロックを選択して操作内容を編集できることを検証
+        // 作成済みマクロの既存ビジュアルブロックを選択して操作内容を編集し、記録済み座標も維持されることを検証
         vm.SelectStepForEditing(vm.EasySteps[1]);
         Assert.Equal(vm.EasySteps[1], vm.SelectedStepForEdit);
         vm.StepFillValueInput = "ABC-1000-EDITED";
         vm.UpdateSelectedStepFromBuilderUi();
         Assert.Contains("ABC-1000-EDITED", vm.EasySteps[1].OperationValueSummary);
+        var updatedFillArgs = vm.EasySteps[1].UnderlyingNode.Args!.Value.Deserialize<ChromeFillArgs>()!;
+        Assert.Equal(250, updatedFillArgs.Locator!.CoordinateX);
+        Assert.Equal(180, updatedFillArgs.Locator.CoordinateY);
 
         // 作成済みマクロに対するブロック追加・上下移動
         vm.SelectedActionKind = IrConstants.ActionCustomAppClick;

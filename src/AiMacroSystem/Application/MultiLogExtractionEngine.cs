@@ -386,6 +386,19 @@ public sealed class MultiLogExtractionEngine
             return AreExcelTargetsCompatible(cluster, current);
         }
 
+        // 双方が明確に離れたスクリーン座標を持つ場合は別箇所への操作として分離する
+        if (current.CoordinateX.HasValue && current.CoordinateY.HasValue)
+        {
+            var prevCoordEv = cluster.Events.FirstOrDefault(e => e.CoordinateX.HasValue && e.CoordinateY.HasValue);
+            if (prevCoordEv is not null &&
+                (Math.Abs(prevCoordEv.CoordinateX!.Value - current.CoordinateX.Value) > 30 ||
+                 Math.Abs(prevCoordEv.CoordinateY!.Value - current.CoordinateY.Value) > 30) &&
+                !MatchesAnySemanticIdentifier(cluster, current))
+            {
+                return false;
+            }
+        }
+
         bool clusterHasSemanticId = cluster.Events.Any(HasAnySemanticIdentity);
         bool currentHasSemanticId = HasAnySemanticIdentity(current);
 

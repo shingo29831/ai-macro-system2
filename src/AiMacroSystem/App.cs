@@ -67,9 +67,16 @@ public sealed class App : System.Windows.Application
         var recordingService = new RecordingService(repository);
         var normalizationService = new NormalizationService(repository);
 
-        var liveBrowserDriver = new LiveChromeBrowserDriver();
+        var liveBrowserDriver = new LiveChromeBrowserDriver
+        {
+            EnableOsAutomation = true,
+            LaunchSystemBrowserOnNavigate = true
+        };
         var liveExcelDriver = new LiveExcelDriver();
-        var liveCustomAppDriver = new LiveCustomAppDriver();
+        var liveCustomAppDriver = new LiveCustomAppDriver
+        {
+            EnableOsAutomation = true
+        };
         var liveLogMonitor = new WindowsLiveLogMonitor();
         var localAiProvider = new LocalBuiltInAiProvider();
 
