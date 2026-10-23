@@ -1,6 +1,8 @@
 // Module: @role: マクロ実行前のアプリ別ウィンドウ選択ダイアログ（サムネイル・名前表示・新規起動選択）および内蔵スマートブラウザウィンドウ
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -11,6 +13,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Navigation;
+using System.Windows.Threading;
+using Microsoft.Win32;
 using AiMacroSystem.Application;
 using AiMacroSystem.Domain;
 using AiMacroSystem.Infrastructure;
@@ -332,7 +336,14 @@ public sealed class BuiltInMacroBrowserWindow : Window
     private readonly Action<RawRecordedEvent>? _onEventCaptured;
     private readonly TextBox _addressOrSearchBox;
     private readonly WebBrowser _webBrowser;
+    private readonly DispatcherTimer _domInspectTimer;
     private string _currentUrl = "https://www.google.com";
+    private string _lastRecordedQuery = string.Empty;
+    private string _lastDomActiveValue = string.Empty;
+    private string _lastDomActiveLabel = "検索";
+    private string _lastDomActiveId = "search-input";
+    private string? _lastFilledValueInReplay;
+    private bool _lastReplaySearchExecuted;
 
     public static BuiltInMacroBrowserWindow GetOrCreate(
         RecordingService recordingService,
@@ -349,6 +360,7 @@ public sealed class BuiltInMacroBrowserWindow : Window
         RecordingService recordingService,
         Action<RawRecordedEvent>? onEventCaptured = null)
     {
+        EnsureModernBrowserEmulationMode();
         _recordingService = recordingService;
         _onEventCaptured = onEventCaptured;
 
@@ -446,8 +458,15 @@ public sealed class BuiltInMacroBrowserWindow : Window
         _webBrowser = new WebBrowser();
         _webBrowser.Navigated += OnWebBrowserNavigated;
         _webBrowser.LoadCompleted += OnWebBrowserLoadCompleted;
+        _webBrowser.PreviewKeyDown += OnWebBrowserPreviewKeyDown;
         Grid.SetRow(_webBrowser, 1);
-        root.Children.Add(root.Children.Count > 0 ? _webBrowser : _webBrowser);
+        root.Children.Add(_webBrowser);
+
+        _domInspectTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+        _domInspectTimer.Tick += (_, _) => InspectActiveDomElement();
+        _domInspectTimer.Start();
+
+        Closed += (_, _) => _domInspectTimer.Stop();
 
         Content = root;
         Loaded += (_, _) =>
@@ -485,6 +504,8 @@ public sealed class BuiltInMacroBrowserWindow : Window
 
     public async Task NavigateWaitAsync(Uri targetUrl, CancellationToken ct)
     {
+        _lastFilledValueInReplay = null;
+        _lastReplaySearchExecuted = false;
         await Dispatcher.InvokeAsync(() =>
         {
             if (!IsVisible) Show();
@@ -494,49 +515,66 @@ public sealed class BuiltInMacroBrowserWindow : Window
             _addressOrSearchBox.Text = _currentUrl;
             try { _webBrowser.Navigate(targetUrl); } catch { }
         });
-        await Task.Delay(450, ct);
+        await Task.Delay(550, ct);
     }
 
     public async Task FillDomElementAsync(SemanticLocator locator, string value, CancellationToken ct)
     {
+        _lastFilledValueInReplay = value;
+        _lastReplaySearchExecuted = false;
         await Dispatcher.InvokeAsync(() =>
         {
             if (!IsVisible) Show();
             Activate();
+
+            string combined = $"{locator.Label} {locator.AccessibleName} {locator.StableId} {_currentUrl}";
+            bool isSearch = combined.Contains("検索", StringComparison.OrdinalIgnoreCase) ||
+                            combined.Contains("search", StringComparison.OrdinalIgnoreCase) ||
+                            combined.Contains("google.", StringComparison.OrdinalIgnoreCase);
+
             try
             {
                 dynamic? doc = _webBrowser.Document;
-                if (doc is null) return;
-
-                string targetKey = locator.Label ?? locator.AccessibleName ?? locator.StableId ?? "q";
-                dynamic? inputs = doc.getElementsByTagName("input");
-                if (inputs is not null)
+                if (doc is not null)
                 {
-                    foreach (dynamic el in inputs)
+                    string targetKey = locator.Label ?? locator.AccessibleName ?? locator.StableId ?? "q";
+                    dynamic? inputs = doc.getElementsByTagName("input");
+                    if (inputs is not null)
                     {
-                        string type = (el.getAttribute("type") as string ?? "text").ToLowerInvariant();
-                        if (type is "hidden" or "submit" or "button") continue;
-
-                        string id = el.id as string ?? "";
-                        string name = el.name as string ?? "";
-                        string title = el.title as string ?? "";
-                        if (string.Equals(id, locator.StableId, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(name, targetKey, StringComparison.OrdinalIgnoreCase) ||
-                            title.Contains(targetKey, StringComparison.OrdinalIgnoreCase) ||
-                            name == "q" || type is "search" or "text")
+                        foreach (dynamic el in inputs)
                         {
-                            el.value = value;
-                            return;
+                            string type = (el.getAttribute("type") as string ?? "text").ToLowerInvariant();
+                            if (type is "hidden" or "submit" or "button") continue;
+
+                            string id = el.id as string ?? "";
+                            string name = el.name as string ?? "";
+                            string title = el.title as string ?? "";
+                            if (string.Equals(id, locator.StableId, StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(name, targetKey, StringComparison.OrdinalIgnoreCase) ||
+                                title.Contains(targetKey, StringComparison.OrdinalIgnoreCase) ||
+                                name == "q" || type is "search" or "text")
+                            {
+                                el.value = value;
+                                break;
+                            }
                         }
                     }
                 }
             }
             catch
             {
-                // DOM直接設定非対応ページはアドレスバー検索へフォールバック
+            }
+
+            if (isSearch && !string.IsNullOrWhiteSpace(value))
+            {
+                string searchUrl = $"https://www.google.com/search?q={Uri.EscapeDataString(value.Trim())}";
+                _currentUrl = searchUrl;
+                _addressOrSearchBox.Text = searchUrl;
+                _lastReplaySearchExecuted = true;
+                try { _webBrowser.Navigate(searchUrl); } catch { }
             }
         });
-        await Task.Delay(120, ct);
+        await Task.Delay(250, ct);
     }
 
     public async Task ClickDomElementAsync(SemanticLocator locator, CancellationToken ct)
@@ -547,11 +585,31 @@ public sealed class BuiltInMacroBrowserWindow : Window
             Activate();
             try
             {
+                bool isEnterSubmit = string.Equals(locator.StableId, "key-enter-submit", StringComparison.OrdinalIgnoreCase) ||
+                                     (locator.AccessibleName is not null && locator.AccessibleName.Contains("Enter", StringComparison.OrdinalIgnoreCase)) ||
+                                     (locator.Label is not null && locator.Label.Contains("検索実行", StringComparison.OrdinalIgnoreCase));
+
+                if (isEnterSubmit)
+                {
+                    if (_lastReplaySearchExecuted)
+                    {
+                        return;
+                    }
+                    if (!string.IsNullOrWhiteSpace(_lastFilledValueInReplay))
+                    {
+                        string searchUrl = $"https://www.google.com/search?q={Uri.EscapeDataString(_lastFilledValueInReplay.Trim())}";
+                        _currentUrl = searchUrl;
+                        _addressOrSearchBox.Text = searchUrl;
+                        _lastReplaySearchExecuted = true;
+                        try { _webBrowser.Navigate(searchUrl); } catch { }
+                        return;
+                    }
+                }
+
                 dynamic? doc = _webBrowser.Document;
                 if (doc is null) return;
 
-                if (string.Equals(locator.StableId, "key-enter-submit", StringComparison.OrdinalIgnoreCase) ||
-                    (locator.AccessibleName is not null && locator.AccessibleName.Contains("Enter", StringComparison.OrdinalIgnoreCase)))
+                if (isEnterSubmit)
                 {
                     dynamic? forms = doc.getElementsByTagName("form");
                     if (forms is not null && forms.length > 0)
@@ -575,6 +633,64 @@ public sealed class BuiltInMacroBrowserWindow : Window
         await Task.Delay(200, ct);
     }
 
+    private void InspectActiveDomElement()
+    {
+        if (!_recordingService.IsRecording || !IsVisible) return;
+        try
+        {
+            dynamic? doc = _webBrowser.Document;
+            if (doc is null) return;
+            dynamic? active = doc.activeElement;
+            if (active is null) return;
+
+            string tag = (active.tagName as string ?? "").ToLowerInvariant();
+            if (tag is "input" or "textarea")
+            {
+                string? val = active.value as string;
+                string? name = active.name as string;
+                string? id = active.id as string;
+                string? title = active.title as string;
+                if (!string.IsNullOrWhiteSpace(val))
+                {
+                    _lastDomActiveValue = val.Trim();
+                    _lastDomActiveLabel = !string.IsNullOrWhiteSpace(title) ? title : (!string.IsNullOrWhiteSpace(name) ? name : "検索");
+                    _lastDomActiveId = !string.IsNullOrWhiteSpace(id) ? id : (!string.IsNullOrWhiteSpace(name) ? $"input-{name}" : "search-input");
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void OnWebBrowserPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        InspectActiveDomElement();
+
+        if (!string.IsNullOrWhiteSpace(_lastDomActiveValue) &&
+            !string.Equals(_lastDomActiveValue, _lastRecordedQuery, StringComparison.Ordinal))
+        {
+            string query = _lastDomActiveValue;
+            _lastRecordedQuery = query;
+            string hostUrl = Uri.TryCreate(_currentUrl, UriKind.Absolute, out Uri? u)
+                ? $"{u.Scheme}://{u.Host}"
+                : "https://www.google.com";
+
+            RecordDomEvent("Navigate", null, null, null, null, hostUrl, null);
+            RecordDomEvent("Input", "textbox", _lastDomActiveLabel, _lastDomActiveLabel, _lastDomActiveId, hostUrl, query);
+            RecordDomEvent("Click", "button", "検索実行 (Enter)", "検索実行 (Enter)", "key-enter-submit", hostUrl, null);
+
+            if (hostUrl.Contains("google.", StringComparison.OrdinalIgnoreCase))
+            {
+                string searchUrl = $"https://www.google.com/search?q={Uri.EscapeDataString(query)}";
+                _addressOrSearchBox.Text = searchUrl;
+                try { _webBrowser.Navigate(searchUrl); } catch { }
+                e.Handled = true;
+            }
+        }
+    }
+
     private void OnWebBrowserNavigated(object sender, NavigationEventArgs e)
     {
         SuppressScriptErrors(_webBrowser);
@@ -593,8 +709,10 @@ public sealed class BuiltInMacroBrowserWindow : Window
                     if (part.StartsWith("q=", StringComparison.OrdinalIgnoreCase))
                     {
                         string decoded = Uri.UnescapeDataString(part[2..].Replace('+', ' '));
-                        if (!string.IsNullOrWhiteSpace(decoded))
+                        if (!string.IsNullOrWhiteSpace(decoded) &&
+                            !string.Equals(decoded, _lastRecordedQuery, StringComparison.Ordinal))
                         {
+                            _lastRecordedQuery = decoded;
                             string hostUrl = $"{e.Uri.Scheme}://{e.Uri.Host}";
                             RecordDomEvent("Navigate", null, null, null, null, hostUrl, null);
                             RecordDomEvent("Input", "textbox", "検索", "検索", "search-q", hostUrl, decoded);
@@ -655,6 +773,22 @@ public sealed class BuiltInMacroBrowserWindow : Window
             windowOrProcessName: "AI Macro 内蔵スマートブラウザ",
             timestampOverride: ts);
         _onEventCaptured?.Invoke(ev);
+    }
+
+    private static void EnsureModernBrowserEmulationMode()
+    {
+        try
+        {
+            string? exePath = Process.GetCurrentProcess().MainModule?.FileName;
+            string exeName = !string.IsNullOrWhiteSpace(exePath) ? Path.GetFileName(exePath) : "AiMacroSystem.exe";
+            using RegistryKey? key = Registry.CurrentUser.CreateSubKey(
+                @"Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BROWSER_EMULATION",
+                writable: true);
+            key?.SetValue(exeName, 11001, RegistryValueKind.DWord);
+        }
+        catch
+        {
+        }
     }
 
     private static void SuppressScriptErrors(WebBrowser browser)
