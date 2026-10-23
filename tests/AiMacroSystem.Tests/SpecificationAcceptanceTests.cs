@@ -863,6 +863,19 @@ public sealed class SpecificationAcceptanceTests : IDisposable
             _recoveryService,
             aiOrchestrator);
 
+        // アプリ別ウィンドウ選択リクエスト生成（Chrome / Excel / CustomApp の3種が検出されること）と選択バインドを検証
+        vm.EditorIrJson = (await localAi.GenerateWorkflowIrJsonAsync(candidates, new PolicyDeclaration(), null, CancellationToken.None));
+        var targetRequests = vm.BuildAppTargetPromptRequests(includeThumbnails: false);
+        Assert.Equal(3, targetRequests.Count);
+        Assert.Contains(targetRequests, r => r.AppCategory == "Chrome" && r.ActionCount == 2);
+        Assert.Contains(targetRequests, r => r.AppCategory == "Excel" && r.ActionCount == 1);
+        Assert.Contains(targetRequests, r => r.AppCategory == "CustomApp" && r.ApplicationName == "社内受注管理システム");
+
+        // ブラウザ検索タイトルからの日本語検索ワード抽出ヘルパーを検証
+        string inferredGoogleUrl = BrowserUiAutomationHelper.InferBrowserUrlOrSearchEngine("名古屋 カフェ - Google 検索 - Google Chrome", out string? extractedQuery);
+        Assert.Equal("https://www.google.com", inferredGoogleUrl);
+        Assert.Equal("名古屋 カフェ", extractedQuery);
+
         // 記録開始で IsRecordingMacro が true になり、記録終了で自動的に複数ログからマクロが生成され IsRecordingMacro が false に戻ることを検証
         vm.StartEasyRecording();
         Assert.True(vm.IsRecordingMacro);

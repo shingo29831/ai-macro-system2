@@ -97,9 +97,55 @@ public sealed class MainWindow : Window
         };
         _vm.PropertyChanged += OnViewModelPropertyChanged;
 
+        _vm.ConfirmExecutionTargetsAsync = ShowTargetWindowSelectionDialogAsync;
+        if (_vm.LiveBrowserDriver is not null)
+        {
+            _vm.LiveBrowserDriver.BuiltInBrowserNavigateAsync = async (uri, ct) =>
+            {
+                var browserWin = BuiltInMacroBrowserWindow.GetOrCreate(_vm.RecordingService, ev => _vm.RecordedEvents.Add(ev));
+                await browserWin.NavigateWaitAsync(uri, ct);
+            };
+            _vm.LiveBrowserDriver.BuiltInBrowserFillAsync = async (locator, val, ct) =>
+            {
+                var browserWin = BuiltInMacroBrowserWindow.GetOrCreate(_vm.RecordingService, ev => _vm.RecordedEvents.Add(ev));
+                await browserWin.FillDomElementAsync(locator, val, ct);
+            };
+            _vm.LiveBrowserDriver.BuiltInBrowserClickAsync = async (locator, ct) =>
+            {
+                var browserWin = BuiltInMacroBrowserWindow.GetOrCreate(_vm.RecordingService, ev => _vm.RecordedEvents.Add(ev));
+                await browserWin.ClickDomElementAsync(locator, ct);
+            };
+        }
+
         Closed += (_, _) => _overlayWindow.Close();
         UpdateInputFieldsVisibility(_vm.SelectedActionKind);
         RebuildVisualBlockChain();
+    }
+
+    private Task<IReadOnlyDictionary<string, WindowTargetSelection>?> ShowTargetWindowSelectionDialogAsync(
+        IReadOnlyList<AppTargetPromptRequest> requests)
+    {
+        var dialog = new TargetWindowSelectionDialog(this, requests);
+        bool? ok = dialog.ShowDialog();
+        return Task.FromResult(ok == true ? dialog.ConfirmedSelections : null);
+    }
+
+    private void OpenBuiltInSmartBrowserAndRecord()
+    {
+        var browserWin = BuiltInMacroBrowserWindow.GetOrCreate(_vm.RecordingService, ev =>
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                _vm.RecordedEvents.Add(ev);
+                _vm.RecordingProgressText = $"記録中 ({_vm.RecordedEvents.Count} ログ): [内蔵ブラウザ] {ev.EventKind} ({ev.CapturedValue ?? ev.TargetLabel ?? ev.UrlOrWorkbookPath})";
+            });
+        });
+        browserWin.Show();
+        browserWin.Activate();
+        if (!_vm.IsRecordingMacro)
+        {
+            _vm.StartEasyRecording();
+        }
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -202,6 +248,11 @@ public sealed class MainWindow : Window
         grid.Children.Add(statusPill);
 
         var headerBtnStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
+
+        var headerBuiltInBrowserBtn = CreateButton("🌐 内蔵ブラウザで記録", Color.FromRgb(13, 148, 136), Colors.White, isCompact: true);
+        headerBuiltInBrowserBtn.Margin = new Thickness(0, 0, 8, 0);
+        headerBuiltInBrowserBtn.Click += (_, _) => OpenBuiltInSmartBrowserAndRecord();
+        headerBtnStack.Children.Add(headerBuiltInBrowserBtn);
 
         var headerRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: true);
         headerRecBtn.Margin = new Thickness(0, 0, 8, 0);
@@ -366,6 +417,11 @@ public sealed class MainWindow : Window
         startRecBtn.Margin = new Thickness(0, 0, 8, 6);
         startRecBtn.Click += (_, _) => _vm.StartEasyRecording();
         topControls.Children.Add(startRecBtn);
+
+        var builtInRecBtn = CreateButton("🌐 内蔵スマートブラウザを開いて記録", Color.FromRgb(13, 148, 136), Colors.White, isCompact: false);
+        builtInRecBtn.Margin = new Thickness(0, 0, 8, 6);
+        builtInRecBtn.Click += (_, _) => OpenBuiltInSmartBrowserAndRecord();
+        topControls.Children.Add(builtInRecBtn);
 
         var stopRecBtn = CreateButton("⏹ 記録終了（自動でマクロへ変換）", _accentNeutral, _textPrimary, isCompact: false);
         stopRecBtn.Margin = new Thickness(0, 0, 8, 6);

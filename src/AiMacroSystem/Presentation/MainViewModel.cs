@@ -65,6 +65,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly AiOrchestrator? _aiOrchestrator;
     private readonly LiveChromeBrowserDriver? _liveBrowserDriver;
     private readonly ILiveOperationLogCollector? _liveLogCollector;
+    private readonly LiveCustomAppDriver? _liveCustomAppDriver;
+
+    public Func<IReadOnlyList<AppTargetPromptRequest>, Task<IReadOnlyDictionary<string, WindowTargetSelection>?>>? ConfirmExecutionTargetsAsync { get; set; }
 
     private string _statusBanner = "準備完了：「▶ 実行」ですぐに開始できます";
     private string _workflowNameInput = "毎日のWeb入力とExcel転記マクロ";
@@ -117,7 +120,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         RecoveryService recoveryService,
         AiOrchestrator? aiOrchestrator = null,
         LiveChromeBrowserDriver? liveBrowserDriver = null,
-        ILiveOperationLogCollector? liveLogCollector = null)
+        ILiveOperationLogCollector? liveLogCollector = null,
+        LiveCustomAppDriver? liveCustomAppDriver = null)
     {
         _repository = repository;
         _workflowService = workflowService;
@@ -130,11 +134,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         _aiOrchestrator = aiOrchestrator;
         _liveBrowserDriver = liveBrowserDriver;
         _liveLogCollector = liveLogCollector;
+        _liveCustomAppDriver = liveCustomAppDriver;
         if (_liveBrowserDriver is not null)
         {
             _openSystemBrowserOnNavigate = _liveBrowserDriver.LaunchSystemBrowserOnNavigate;
         }
     }
+
+    public RecordingService RecordingService => _recordingService;
+    public LiveChromeBrowserDriver? LiveBrowserDriver => _liveBrowserDriver;
 
     public ObservableCollection<WorkflowVersionRecord> WorkflowVersions { get; } = new();
     public ObservableCollection<WorkflowDraftRecord> WorkflowDrafts { get; } = new();
@@ -1112,9 +1120,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
             }
         }
 
+        if (_liveBrowserDriver?.CurrentUrl is not null)
+        {
+            TryRegisterOrigin(_liveBrowserDriver.CurrentUrl.ToString(), origins);
+        }
+
         if (origins.Count == 0)
         {
             origins.Add(new OriginRule { Scheme = "https", Host = "example.com", Port = 443 });
+            origins.Add(new OriginRule { Scheme = "https", Host = "www.google.com", Port = 443 });
         }
 
         if (!string.IsNullOrWhiteSpace(AllowedOriginHostInput) &&
@@ -1449,6 +1463,24 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _activeRunningExecutionId = execId;
             RunningProgressText = $"実行中: {WorkflowNameInput} ({completedNodeId} 完了)";
             await Task.Delay(350);
+        }
+
+        // 実行前に各操作対象アプリ（ブラウザ・Excel・独自アプリ）ごとに新規ウィンドウ起動か既存ウィンドウかを選択させる
+        var promptRequests = BuildAppTargetPromptRequests(includeThumbnails: ConfirmExecutionTargetsAsync is not null);
+        if (promptRequests.Count > 0 && ConfirmExecutionTargetsAsync is not null)
+        {
+            var selectedTargets = await ConfirmExecutionTargetsAsync(promptRequests);
+            if (selectedTargets is null)
+            {
+                StatusBanner = "⏹ 実行対象ウィンドウの選択がキャンセルされたため、マクロ実行を中止しました。";
+                return;
+            }
+            ApplyWindowTargetSelections(selectedTargets);
+        }
+        else
+        {
+            _liveBrowserDriver?.ConfigureTargetSelection(null);
+            _liveCustomAppDriver?.ConfigureTargetSelections(null);
         }
 
         _executionEngine.ActionNodeCompletedAsync += OnStepCompleted;
@@ -1980,6 +2012,111 @@ public sealed class MainViewModel : INotifyPropertyChanged
             default:
                 return (node.ActionType ?? "アクション", "");
         }
+    }
+
+    public IReadOnlyList<AppTargetPromptRequest> BuildAppTargetPromptRequests(bool includeThumbnails = true)
+    {
+        var requests = new List<AppTargetPromptRequest>();
+        var actionNodes = new List<WorkflowNode>();
+
+        try
+        {
+            var def = JsonSerializer.Deserialize<WorkflowDefinition>(EditorIrJson);
+            if (def?.Root is not null)
+            {
+                CollectActionNodesRecursive(def.Root, actionNodes);
+            }
+        }
+        catch
+        {
+        }
+
+        if (actionNodes.Count == 0 && EasySteps.Count > 0)
+        {
+            actionNodes.AddRange(EasySteps.Select(s => s.UnderlyingNode));
+        }
+
+        int chromeCount = actionNodes.Count(n => n.ActionType is not null && n.ActionType.StartsWith("Chrome.", StringComparison.Ordinal));
+        if (chromeCount > 0)
+        {
+            string? firstUrl = actionNodes
+                .Where(n => n.ActionType == IrConstants.ActionChromeNavigate && n.Args.HasValue)
+                .Select(n => n.Args!.Value.Deserialize<ChromeNavigateArgs>()?.Url)
+                .FirstOrDefault(u => !string.IsNullOrWhiteSpace(u));
+
+            var browserWindows = WindowThumbnailCaptureService.GetOpenWindowsForTarget("Chrome", null, includeThumbnails);
+            requests.Add(new AppTargetPromptRequest
+            {
+                TargetKey = "Browser",
+                AppCategory = "Chrome",
+                ApplicationName = "Chrome",
+                DisplayTitle = "ブラウザ操作 (Chrome / Edge / 内蔵スマートブラウザ)",
+                ActionCount = chromeCount,
+                InitialUrlOrPath = firstUrl,
+                AvailableWindows = browserWindows
+            });
+        }
+
+        int excelCount = actionNodes.Count(n => n.ActionType is not null && n.ActionType.StartsWith("Excel.", StringComparison.Ordinal));
+        if (excelCount > 0)
+        {
+            var excelWindows = WindowThumbnailCaptureService.GetOpenWindowsForTarget("Excel", null, includeThumbnails);
+            requests.Add(new AppTargetPromptRequest
+            {
+                TargetKey = "Excel",
+                AppCategory = "Excel",
+                ApplicationName = "Excel",
+                DisplayTitle = "Excel ブック操作",
+                ActionCount = excelCount,
+                InitialUrlOrPath = StepExcelPathInput,
+                AvailableWindows = excelWindows
+            });
+        }
+
+        var customGroups = actionNodes
+            .Where(n => n.ActionType is not null && n.ActionType.StartsWith("CustomApp.", StringComparison.Ordinal))
+            .GroupBy(n =>
+            {
+                if (!n.Args.HasValue) return "独自アプリ";
+                return n.ActionType switch
+                {
+                    IrConstants.ActionCustomAppClick => n.Args.Value.Deserialize<CustomAppClickArgs>()?.ApplicationName ?? "独自アプリ",
+                    IrConstants.ActionCustomAppFill => n.Args.Value.Deserialize<CustomAppFillArgs>()?.ApplicationName ?? "独自アプリ",
+                    IrConstants.ActionCustomAppReadText => n.Args.Value.Deserialize<CustomAppReadTextArgs>()?.ApplicationName ?? "独自アプリ",
+                    _ => "独自アプリ"
+                };
+            }, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var grp in customGroups)
+        {
+            string appName = string.IsNullOrWhiteSpace(grp.Key) ? "独自アプリ" : grp.Key;
+            var customWindows = WindowThumbnailCaptureService.GetOpenWindowsForTarget("CustomApp", appName, includeThumbnails);
+            requests.Add(new AppTargetPromptRequest
+            {
+                TargetKey = $"CustomApp:{appName}",
+                AppCategory = "CustomApp",
+                ApplicationName = appName,
+                DisplayTitle = $"独自アプリ「{appName}」",
+                ActionCount = grp.Count(),
+                AvailableWindows = customWindows
+            });
+        }
+
+        return requests;
+    }
+
+    public void ApplyWindowTargetSelections(IReadOnlyDictionary<string, WindowTargetSelection> selections)
+    {
+        if (selections.TryGetValue("Browser", out var browserSel))
+        {
+            _liveBrowserDriver?.ConfigureTargetSelection(browserSel);
+        }
+        else
+        {
+            _liveBrowserDriver?.ConfigureTargetSelection(null);
+        }
+
+        _liveCustomAppDriver?.ConfigureTargetSelections(selections);
     }
 
     public void RefreshExecutionMonitor(string executionId)

@@ -112,7 +112,8 @@ public sealed class App : System.Windows.Application
             recoveryService,
             aiOrchestrator,
             liveBrowserDriver,
-            liveLogMonitor);
+            liveLogMonitor,
+            liveCustomAppDriver);
 
         var app = new App();
         var window = new MainWindow(viewModel);
