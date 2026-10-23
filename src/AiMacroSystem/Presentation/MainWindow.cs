@@ -1,6 +1,7 @@
 // Module: @role: 仕様書15章の必須UI10画面（一覧・記録・編集・検証・実行前レビュー・承認・監視・履歴・復旧・設定）を提供するメインウィンドウ
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -8,6 +9,24 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using AiMacroSystem.Domain;
+using AiMacroSystem.Infrastructure### 原因と根本解決策
+
+* **原因**: `src/AiMacroSystem/Presentation/MainWindow.cs` において、`AppTargetPromptRequest` および `WindowTargetSelection` が定義されている `AiMacroSystem.Infrastructure` 名前空間の `using` ディレクティブが不足していました。
+* **根本解決策**: `MainWindow.cs` の冒頭に `using AiMacroSystem.Infrastructure;` を追加し、実行対象ウィンドウ選択モデルの型参照を解決します。
+
+```text
+ファイルパス: src/AiMacroSystem/Presentation/MainWindow.cs
+<<<<
+using System.Windows.Input;
+using System.Windows.Media;
+using AiMacroSystem.Domain;
+
+namespace AiMacroSystem.Presentation;
+====
+using System.Windows.Input;
+using System.Windows.Media;
+using AiMacroSystem.Domain;
+using AiMacroSystem.Infrastructure;
 
 namespace AiMacroSystem.Presentation;
 
