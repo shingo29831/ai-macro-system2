@@ -9,23 +9,6 @@ using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
 using AiMacroSystem.Domain;
-using AiMacroSystem.Infrastructure### 原因と根本解決策
-
-* **原因**: `src/AiMacroSystem/Presentation/MainWindow.cs` において、`AppTargetPromptRequest` および `WindowTargetSelection` が定義されている `AiMacroSystem.Infrastructure` 名前空間の `using` ディレクティブが不足していました。
-* **根本解決策**: `MainWindow.cs` の冒頭に `using AiMacroSystem.Infrastructure;` を追加し、実行対象ウィンドウ選択モデルの型参照を解決します。
-
-```text
-ファイルパス: src/AiMacroSystem/Presentation/MainWindow.cs
-<<<<
-using System.Windows.Input;
-using System.Windows.Media;
-using AiMacroSystem.Domain;
-
-namespace AiMacroSystem.Presentation;
-====
-using System.Windows.Input;
-using System.Windows.Media;
-using AiMacroSystem.Domain;
 using AiMacroSystem.Infrastructure;
 
 namespace AiMacroSystem.Presentation;
@@ -225,6 +208,7 @@ public sealed class MainWindow : Window
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var titleStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var badge = new Border
