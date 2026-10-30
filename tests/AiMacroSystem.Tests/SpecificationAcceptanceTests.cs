@@ -815,9 +815,9 @@ public sealed class SpecificationAcceptanceTests : IDisposable
 
         recorder.StopRecording();
 
-        // 11件の複数生ログからノイズが除去・統合され、高精度な4件のアクション候補が抽出されることを検証
+        // 12件の複数生ログからノイズが除去・統合され、高精度な4件のアクション候補が抽出されることを検証
         var rawEvents = recorder.GetRecordedEvents();
-        Assert.Equal(11, rawEvents.Count);
+        Assert.Equal(12, rawEvents.Count);
 
         var candidates = normalizer.Normalize(rawEvents);
         Assert.Equal(4, candidates.Count);
