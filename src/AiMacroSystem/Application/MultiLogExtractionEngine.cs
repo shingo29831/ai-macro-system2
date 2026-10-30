@@ -414,11 +414,27 @@ public sealed class MultiLogExtractionEngine
         }
 
         return !requireExplicitMatchWhenBothHaveIdentity &&
-               string.Equals(
+               AreRolesCompatible(
                    cluster.Events.Select(e => e.TargetRole).FirstOrDefault(r => !string.IsNullOrWhiteSpace(r)),
-                   current.TargetRole,
-                   StringComparison.OrdinalIgnoreCase) &&
+                   current.TargetRole) &&
                !HasConflictingNamedIdentifiers(cluster, current);
+    }
+
+    private static bool AreRolesCompatible(string? roleA, string? roleB)
+    {
+        if (string.IsNullOrWhiteSpace(roleA) || string.IsNullOrWhiteSpace(roleB)) return true;
+        if (string.Equals(roleA, roleB, StringComparison.OrdinalIgnoreCase)) return true;
+
+        bool isTextA = roleA.Equals("textbox", StringComparison.OrdinalIgnoreCase) ||
+                       roleA.Equals("text", StringComparison.OrdinalIgnoreCase) ||
+                       roleA.Equals("edit", StringComparison.OrdinalIgnoreCase) ||
+                       roleA.Equals("input", StringComparison.OrdinalIgnoreCase);
+        bool isTextB = roleB.Equals("textbox", StringComparison.OrdinalIgnoreCase) ||
+                       roleB.Equals("text", StringComparison.OrdinalIgnoreCase) ||
+                       roleB.Equals("edit", StringComparison.OrdinalIgnoreCase) ||
+                       roleB.Equals("input", StringComparison.OrdinalIgnoreCase);
+
+        return isTextA && isTextB;
     }
 
     private static bool HasAnySemanticIdentity(RawRecordedEvent ev) =>
@@ -429,6 +445,10 @@ public sealed class MultiLogExtractionEngine
 
     private static bool MatchesAnySemanticIdentifier(EventCluster cluster, RawRecordedEvent current)
     {
+        var currentNames = new[] { current.TargetName, current.TargetLabel }
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .ToList();
+
         foreach (var prev in cluster.Events)
         {
             if (!string.IsNullOrWhiteSpace(prev.TargetStableId) &&
@@ -436,20 +456,27 @@ public sealed class MultiLogExtractionEngine
             {
                 return true;
             }
-            if (!string.IsNullOrWhiteSpace(prev.TargetLabel) &&
-                string.Equals(prev.TargetLabel, current.TargetLabel, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-            if (!string.IsNullOrWhiteSpace(prev.TargetName) &&
-                string.Equals(prev.TargetName, current.TargetName, StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
             if (!string.IsNullOrWhiteSpace(prev.CssSelector) &&
                 string.Equals(prev.CssSelector, current.CssSelector, StringComparison.OrdinalIgnoreCase))
             {
                 return true;
+            }
+
+            var prevNames = new[] { prev.TargetName, prev.TargetLabel }
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .ToList();
+
+            foreach (var pn in prevNames)
+            {
+                foreach (var cn in currentNames)
+                {
+                    if (string.Equals(pn, cn, StringComparison.OrdinalIgnoreCase) ||
+                        pn.Contains(cn, StringComparison.OrdinalIgnoreCase) ||
+                        cn.Contains(pn, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
             }
         }
         return false;
@@ -460,7 +487,9 @@ public sealed class MultiLogExtractionEngine
         string? clusterName = cluster.Events.Select(e => e.TargetName).FirstOrDefault(n => !string.IsNullOrWhiteSpace(n));
         if (!string.IsNullOrWhiteSpace(clusterName) &&
             !string.IsNullOrWhiteSpace(current.TargetName) &&
-            !string.Equals(clusterName, current.TargetName, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(clusterName, current.TargetName, StringComparison.OrdinalIgnoreCase) &&
+            !clusterName.Contains(current.TargetName, StringComparison.OrdinalIgnoreCase) &&
+            !current.TargetName.Contains(clusterName, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -468,7 +497,9 @@ public sealed class MultiLogExtractionEngine
         string? clusterLabel = cluster.Events.Select(e => e.TargetLabel).FirstOrDefault(l => !string.IsNullOrWhiteSpace(l));
         if (!string.IsNullOrWhiteSpace(clusterLabel) &&
             !string.IsNullOrWhiteSpace(current.TargetLabel) &&
-            !string.Equals(clusterLabel, current.TargetLabel, StringComparison.OrdinalIgnoreCase))
+            !string.Equals(clusterLabel, current.TargetLabel, StringComparison.OrdinalIgnoreCase) &&
+            !clusterLabel.Contains(current.TargetLabel, StringComparison.OrdinalIgnoreCase) &&
+            !current.TargetLabel.Contains(clusterLabel, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -527,7 +558,11 @@ public sealed class MultiLogExtractionEngine
         {
             bestName ??= bestLabel;
             bestLabel ??= bestName;
-            if (string.IsNullOrWhiteSpace(bestRole) && (!string.IsNullOrWhiteSpace(bestName) || !string.IsNullOrWhiteSpace(bestLabel)))
+            if (cluster.IntentKind is "Input" or "Write" && (bestRole == "text" || string.IsNullOrWhiteSpace(bestRole)))
+            {
+                bestRole = "textbox";
+            }
+            else if (string.IsNullOrWhiteSpace(bestRole) && (!string.IsNullOrWhiteSpace(bestName) || !string.IsNullOrWhiteSpace(bestLabel)))
             {
                 bestRole = cluster.IntentKind switch
                 {
