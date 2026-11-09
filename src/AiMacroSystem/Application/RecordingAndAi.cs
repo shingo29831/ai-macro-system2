@@ -231,7 +231,7 @@ public sealed class RecordingService
         return recorded;
     }
 
-    public IReadOnlyList<RawRecordedEvent> GetRecordedEvents() => _events.AsReadOnly();
+    public IReadOnlyList<RawRecordedEvent> GetRecordedEvents() => _events.ToList();
 }
 
 public sealed class NormalizationService
