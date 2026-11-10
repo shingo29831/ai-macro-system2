@@ -86,10 +86,42 @@ public static class MainWindowUiFactory
 
     public static StackPanel CreateLabeledInput(string label, string bindingPath)
     {
-        var sp = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
+        var sp = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
         sp.Children.Add(CreateFieldLabel(label));
         sp.Children.Add(CreateCleanTextBox(bindingPath));
         return sp;
+    }
+
+    public static TabControl CreateSubTabControl() =>
+        new()
+        {
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Margin = new Thickness(0, 4, 0, 0),
+            Padding = new Thickness(0, 8, 0, 0)
+        };
+
+    public static StackPanel CreateSectionHeader(string title, string? subtitle = null)
+    {
+        var stack = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
+        stack.Children.Add(new TextBlock
+        {
+            Text = title,
+            FontSize = 15,
+            FontWeight = FontWeights.Bold,
+            Foreground = new SolidColorBrush(TextPrimary)
+        });
+        if (!string.IsNullOrWhiteSpace(subtitle))
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = subtitle,
+                FontSize = 12,
+                Foreground = new SolidColorBrush(TextSecondary),
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+        }
+        return stack;
     }
 
     public static Button CreateButton(string text, Color bg, Color fg, bool isCompact)

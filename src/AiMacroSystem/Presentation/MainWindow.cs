@@ -17,6 +17,7 @@ public sealed partial class MainWindow : Window
     private readonly ExecutionOverlayWindow _overlayWindow;
     private readonly TabControl _mainTabs;
     private readonly StackPanel _visualBlockChainPanel;
+    private TabControl? _settingsAndRecoverySubTabs;
 
     private StackPanel _fieldUrlPanel = null!;
     private StackPanel _fieldCustomAppPanel = null!;
@@ -63,12 +64,13 @@ public sealed partial class MainWindow : Window
             BorderThickness = new Thickness(0)
         };
 
-        _mainTabs.Items.Add(new TabItem { Header = "① ワークフロー一覧", Content = CreateWorkflowListTab() });
-        _mainTabs.Items.Add(new TabItem { Header = "② 操作記録・AI変換", Content = CreateRecordingTab() });
-        _mainTabs.Items.Add(new TabItem { Header = "③ 編集 (ブロック/IR)", Content = CreateVisualBlockEditorView() });
-        _mainTabs.Items.Add(new TabItem { Header = "④ 検証・実行前レビュー・承認", Content = CreateValidationReviewApprovalTab() });
-        _mainTabs.Items.Add(new TabItem { Header = "⑤ 実行モニター・履歴", Content = CreateMonitorAndHistoryTab() });
-        _mainTabs.Items.Add(new TabItem { Header = "⑥ 復旧・設定", Content = CreateRecoveryAndSettingsTab() });
+        _mainTabs.Items.Add(new TabItem { Header = "📁 マクロ一覧", Content = CreateWorkflowListTab(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "🔴 操作記録", Content = CreateRecordingTab(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "✏ 手順編集", Content = CreateVisualBlockEditorView(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "🛡 確認・承認", Content = CreateValidationReviewApprovalTab(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "▶ 実行モニター", Content = CreateMonitorAndHistoryTab(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "📊 履歴・監査", Content = CreateHistoryAndAuditTab(), Padding = new Thickness(12, 6, 12, 6) });
+        _mainTabs.Items.Add(new TabItem { Header = "⚙ 設定・復旧", Content = CreateRecoveryAndSettingsTab(), Padding = new Thickness(12, 6, 12, 6) });
 
         Grid.SetRow(_mainTabs, 2);
         root.Children.Add(_mainTabs);
@@ -239,19 +241,14 @@ public sealed partial class MainWindow : Window
 
         var headerBtnStack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
 
-        var headerBuiltInBrowserBtn = CreateButton("🌐 内蔵ブラウザで記録", Color.FromRgb(13, 148, 136), Colors.White, isCompact: true);
+        var headerBuiltInBrowserBtn = CreateButton("🌐 内蔵ブラウザ", Color.FromRgb(13, 148, 136), Colors.White, isCompact: true);
         headerBuiltInBrowserBtn.Margin = new Thickness(0, 0, 8, 0);
         headerBuiltInBrowserBtn.Click += (_, _) => OpenBuiltInSmartBrowserAndRecord();
         headerBtnStack.Children.Add(headerBuiltInBrowserBtn);
 
         var headerRecBtn = CreateButton("🔴 記録開始", _accentDanger, Colors.White, isCompact: true);
-        headerRecBtn.Margin = new Thickness(0, 0, 8, 0);
         headerRecBtn.Click += (_, _) => _vm.StartEasyRecording();
         headerBtnStack.Children.Add(headerRecBtn);
-
-        var headerSaveBtn = CreateButton("💾 マクロを保存", _accentPrimary, Colors.White, isCompact: true);
-        headerSaveBtn.Click += (_, _) => _vm.SaveCurrentWorkflowAsVersion();
-        headerBtnStack.Children.Add(headerSaveBtn);
 
         Grid.SetColumn(headerBtnStack, 2);
         grid.Children.Add(headerBtnStack);
@@ -277,14 +274,21 @@ public sealed partial class MainWindow : Window
         };
 
         var dock = new DockPanel();
-        var unlockBtn = CreateButton("復旧タブで判断する", _accentDanger, Colors.White, isCompact: true);
-        unlockBtn.Click += (_, _) => _mainTabs.SelectedIndex = 5;
+        var unlockBtn = CreateButton("復旧画面を開く", _accentDanger, Colors.White, isCompact: true);
+        unlockBtn.Click += (_, _) =>
+        {
+            _mainTabs.SelectedIndex = 6;
+            if (_settingsAndRecoverySubTabs is not null)
+            {
+                _settingsAndRecoverySubTabs.SelectedIndex = 1;
+            }
+        };
         DockPanel.SetDock(unlockBtn, Dock.Right);
         dock.Children.Add(unlockBtn);
 
         dock.Children.Add(new TextBlock
         {
-            Text = "⚠️ 未終端または成否不明(Unknown)の実行が検出されました。状態照合と復旧判断が完了するまで新規実行は禁止されます。",
+            Text = "⚠️ 前回の実行が中断されました。安全のため、復旧画面で状態を確認してください。",
             Foreground = new SolidColorBrush(Color.FromRgb(185, 28, 28)),
             FontWeight = FontWeights.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
