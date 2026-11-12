@@ -2,12 +2,41 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using AiMacroSystem.Application;
 using AiMacroSystem.Domain;
 
 namespace AiMacroSystem.Presentation;
 
 public sealed partial class MainViewModel
 {
+    private int _lastChunkCount;
+    public int LastChunkCount
+    {
+        get => _lastChunkCount;
+        private set { _lastChunkCount = value; OnPropertyChanged(); }
+    }
+
+    private int _lastEstimatedTokens;
+    public int LastEstimatedTokens
+    {
+        get => _lastEstimatedTokens;
+        private set { _lastEstimatedTokens = value; OnPropertyChanged(); }
+    }
+
+    private int _lastFilteredOutEventCount;
+    public int LastFilteredOutEventCount
+    {
+        get => _lastFilteredOutEventCount;
+        private set { _lastFilteredOutEventCount = value; OnPropertyChanged(); }
+    }
+
+    private string _chunkAndFilterSummaryText = string.Empty;
+    public string ChunkAndFilterSummaryText
+    {
+        get => _chunkAndFilterSummaryText;
+        private set { _chunkAndFilterSummaryText = value; OnPropertyChanged(); }
+    }
+
     public void StartEasyRecording()
     {
         _recordingService.StartRecording();
@@ -63,7 +92,14 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var candidates = _normalizationService.Normalize(rawList);
+        var (candidates, chunks) = _normalizationService.NormalizeAndChunk(rawList);
+        var filterSummary = _normalizationService.LastFilterSummary;
+        LastChunkCount = Math.Max(1, chunks.Count);
+        LastEstimatedTokens = filterSummary?.FilteredEstimatedTokens ?? TokenEstimator.EstimateTotalTokens(candidates);
+        LastFilteredOutEventCount = filterSummary?.FilteredOutEventCount ?? 0;
+        ChunkAndFilterSummaryText = $"チャンク分割: {LastChunkCount}個 / 推定トークン: {LastEstimatedTokens} / フィルタ除外: {LastFilteredOutEventCount}件";
+        RecordingProgressText = $"解析完了 ({rawList.Count}件 -> 有効候補{candidates.Count}件, {ChunkAndFilterSummaryText})";
+
         var policy = new PolicyDeclaration
         {
             AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
@@ -73,6 +109,11 @@ public sealed partial class MainViewModel
         if (_aiOrchestrator is not null)
         {
             var outcome = await _aiOrchestrator.GenerateAndValidateIrAsync(candidates, policy, AllowExternalAiPolicy, default);
+            LastChunkCount = Math.Max(LastChunkCount, outcome.TotalChunksCount);
+            if (outcome.EstimatedTokens > 0) LastEstimatedTokens = outcome.EstimatedTokens;
+            LastFilteredOutEventCount = Math.Max(LastFilteredOutEventCount, outcome.FilteredOutEventCount);
+            ChunkAndFilterSummaryText = $"チャンク分割: {LastChunkCount}個 / 推定トークン: {LastEstimatedTokens} / フィルタ除外: {LastFilteredOutEventCount}件";
+
             RefreshAllListsFromDatabase();
 
             if (outcome.IsAccepted && outcome.RawJson is not null)
@@ -89,10 +130,14 @@ public sealed partial class MainViewModel
                 ValidateCurrentEditorIr();
                 IsEditingMode = true;
                 VisualBlocksUpdated?.Invoke();
-                StatusBanner = $"✨ 複数ログ（{rawList.Count}件）から {EasySteps.Count} 個の操作ブロックを抽出し、マクロ化しました！";
+                StatusBanner = $"✨ 複数ログ（{rawList.Count}件）から {EasySteps.Count} 個の操作ブロックを抽出し、マクロ化しました！（{ChunkAndFilterSummaryText}）";
                 return;
             }
-            StatusBanner = $"⚠️ AI生成結果が安全基準でブロックされました: {outcome.ErrorReason}";
+
+            string chunkHint = !string.IsNullOrWhiteSpace(outcome.FailedChunkId)
+                ? $" [失敗チャンク: {outcome.FailedChunkId}]"
+                : string.Empty;
+            StatusBanner = $"⚠️ AI生成結果が安全基準でブロックされました{chunkHint}: {outcome.ErrorReason}";
             return;
         }
 

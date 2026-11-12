@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -238,21 +239,53 @@ public sealed class NormalizationService
 {
     private readonly SqliteRepository? _repository;
     private readonly MultiLogExtractionEngine _extractionEngine;
+    private readonly LogChunkingOptions _chunkingOptions;
 
-    public NormalizationService(SqliteRepository? repository = null, MultiLogExtractionEngine? extractionEngine = null)
+    public IReadOnlyList<LogChunk> LastGeneratedChunks { get; private set; } = Array.Empty<LogChunk>();
+    public LogFilterSummary? LastFilterSummary { get; private set; }
+
+    public NormalizationService(
+        SqliteRepository? repository = null,
+        MultiLogExtractionEngine? extractionEngine = null,
+        LogChunkingOptions? chunkingOptions = null)
     {
         _repository = repository;
         _extractionEngine = extractionEngine ?? new MultiLogExtractionEngine();
+        _chunkingOptions = chunkingOptions ?? new LogChunkingOptions();
     }
 
     public IReadOnlyList<NormalizedActionCandidate> Normalize(IReadOnlyList<RawRecordedEvent> rawEvents)
     {
-        var candidates = _extractionEngine.ExtractCandidates(rawEvents);
+        var (candidates, _) = NormalizeAndChunk(rawEvents, _chunkingOptions);
+        return candidates;
+    }
+
+    public (IReadOnlyList<NormalizedActionCandidate> Candidates, IReadOnlyList<LogChunk> Chunks) NormalizeAndChunk(
+        IReadOnlyList<RawRecordedEvent> rawEvents,
+        LogChunkingOptions? options = null)
+    {
+        var effectiveOptions = options ?? _chunkingOptions;
+        var (candidates, summary) = _extractionEngine.ExtractCandidatesWithSummary(rawEvents);
+        LastFilterSummary = summary;
+
         foreach (var candidate in candidates)
         {
             _repository?.InsertNormalizedCandidate(candidate);
         }
-        return candidates;
+
+        var chunks = LogChunker.BuildChunks(
+            rawEvents,
+            candidates,
+            effectiveOptions,
+            summary.FilteredOutEventCount);
+        LastGeneratedChunks = chunks;
+
+        if (chunks.Count > 0)
+        {
+            _repository?.SaveLogChunks(chunks);
+        }
+
+        return (candidates, chunks);
     }
 }
 
@@ -278,6 +311,12 @@ public sealed class AiGenerationOutcome
     public required ValidationResult Validation { get; init; }
     public required string ErrorReason { get; init; }
     public required int RepairAttemptsUsed { get; init; }
+    public int TotalChunksCount { get; init; } = 1;
+    public int EstimatedTokens { get; init; }
+    public int FilteredOutEventCount { get; init; }
+    public string? FailedChunkId { get; init; }
+    public bool UsedFallbackGeneration { get; init; }
+    public IReadOnlyList<string> ProcessedChunkIds { get; init; } = Array.Empty<string>();
 }
 
 public sealed class AiOrchestrator
@@ -287,19 +326,22 @@ public sealed class AiOrchestrator
     private readonly IrValidator _validator;
     private readonly SqliteRepository _repository;
     private readonly int _maxRepairAttempts;
+    private readonly LogChunkingOptions _chunkingOptions;
 
     public AiOrchestrator(
         IAiProvider localProvider,
         IAiProvider? externalProvider,
         IrValidator validator,
         SqliteRepository repository,
-        int maxRepairAttempts = 2)
+        int maxRepairAttempts = 2,
+        LogChunkingOptions? chunkingOptions = null)
     {
         _localProvider = localProvider;
         _externalProvider = externalProvider;
         _validator = validator;
         _repository = repository;
         _maxRepairAttempts = maxRepairAttempts;
+        _chunkingOptions = chunkingOptions ?? new LogChunkingOptions();
     }
 
     public async Task<AiGenerationOutcome> GenerateAndValidateIrAsync(
@@ -363,6 +405,37 @@ public sealed class AiOrchestrator
             ? SanitizeCandidatesForExternalAi(candidates)
             : candidates;
 
+        var rawEvents = _repository.GetRawRecordedEvents();
+        int usedRawCount = safeCandidates.SelectMany(c => c.SourceRawEventIds).Distinct(StringComparer.Ordinal).Count();
+        int baseFilteredOutCount = rawEvents.Count > usedRawCount ? rawEvents.Count - usedRawCount : 0;
+
+        var chunks = LogChunker.BuildChunks(rawEvents, safeCandidates, _chunkingOptions, baseFilteredOutCount);
+        if (chunks.Count > 0)
+        {
+            _repository.SaveLogChunks(chunks);
+        }
+
+        int totalTokens = TokenEstimator.EstimateTotalTokens(safeCandidates);
+        string primaryChunkLabel = chunks.Count == 1 ? chunks[0].ChunkId : $"batch-{chunks.Count}chunks";
+        var chunkIds = chunks.Select(c => c.ChunkId).ToList();
+
+        // 長大ログ（上限トークン超過）の場合は最初から重要度フィルタリングまたはチャンク段階生成を適用する
+        if (totalTokens > _chunkingOptions.MaxTokensPerChunk)
+        {
+            var fallbackOutcome = await TryFallbackGenerationAsync(
+                activeProvider,
+                safeCandidates,
+                chunks,
+                policy,
+                externalApproved,
+                baseFilteredOutCount,
+                ct);
+            if (fallbackOutcome is not null)
+            {
+                return fallbackOutcome;
+            }
+        }
+
         IReadOnlyList<ValidationIssue>? previousIssues = null;
         ValidationResult lastValidation = new();
         string lastJson = string.Empty;
@@ -377,7 +450,17 @@ public sealed class AiOrchestrator
 
             if (validation.IsValid && definition is not null)
             {
-                RecordAudit(activeProvider.ProviderName, activeProvider.ModelId, "AllStagesPassed", true, "NONE", attempt, externalApproved);
+                RecordAudit(
+                    activeProvider.ProviderName,
+                    activeProvider.ModelId,
+                    "AllStagesPassed",
+                    true,
+                    "NONE",
+                    attempt,
+                    externalApproved,
+                    primaryChunkLabel,
+                    totalTokens,
+                    baseFilteredOutCount);
                 return new AiGenerationOutcome
                 {
                     IsAccepted = true,
@@ -385,16 +468,44 @@ public sealed class AiOrchestrator
                     RawJson = lastJson,
                     Validation = validation,
                     ErrorReason = string.Empty,
-                    RepairAttemptsUsed = attempt
+                    RepairAttemptsUsed = attempt,
+                    TotalChunksCount = Math.Max(1, chunks.Count),
+                    EstimatedTokens = totalTokens,
+                    FilteredOutEventCount = baseFilteredOutCount,
+                    ProcessedChunkIds = chunkIds
                 };
             }
 
             previousIssues = validation.Issues;
         }
 
+        // 一括生成が全試行失敗した場合、重要度フィルタリングまたはチャンク単位の段階的生成へフォールバックする
+        var postFailureFallback = await TryFallbackGenerationAsync(
+            activeProvider,
+            safeCandidates,
+            chunks,
+            policy,
+            externalApproved,
+            baseFilteredOutCount,
+            ct);
+        if (postFailureFallback is not null)
+        {
+            return postFailureFallback;
+        }
+
         string firstErrorCode = lastValidation.Issues.FirstOrDefault()?.Code ?? "VALIDATION_FAILED";
         string stageSummary = string.Join(",", lastValidation.Issues.Select(i => i.Stage.ToString()).Distinct());
-        RecordAudit(activeProvider.ProviderName, activeProvider.ModelId, stageSummary, false, firstErrorCode, _maxRepairAttempts, externalApproved);
+        RecordAudit(
+            activeProvider.ProviderName,
+            activeProvider.ModelId,
+            stageSummary,
+            false,
+            firstErrorCode,
+            _maxRepairAttempts,
+            externalApproved,
+            primaryChunkLabel,
+            totalTokens,
+            baseFilteredOutCount);
 
         return new AiGenerationOutcome
         {
@@ -402,8 +513,254 @@ public sealed class AiOrchestrator
             RawJson = lastJson,
             Validation = lastValidation,
             ErrorReason = string.Join("; ", lastValidation.Issues.Select(i => $"[{i.Code}] {i.Message}")),
-            RepairAttemptsUsed = _maxRepairAttempts
+            RepairAttemptsUsed = _maxRepairAttempts,
+            TotalChunksCount = Math.Max(1, chunks.Count),
+            EstimatedTokens = totalTokens,
+            FilteredOutEventCount = baseFilteredOutCount,
+            FailedChunkId = chunks.FirstOrDefault()?.ChunkId,
+            ProcessedChunkIds = chunkIds
         };
+    }
+
+    public async Task<AiGenerationOutcome> RetryChunkGenerationAsync(
+        string chunkId,
+        PolicyDeclaration policy,
+        bool userApprovedExternalAi,
+        CancellationToken ct = default)
+    {
+        var chunk = _repository.GetLogChunkById(chunkId);
+        if (chunk is null)
+        {
+            var notFoundVal = new ValidationResult();
+            notFoundVal.AddIssue(
+                ValidationStage.TargetAndAllowedScope,
+                "CHUNK_NOT_FOUND",
+                $"LogChunk '{chunkId}' was not found in repository.");
+            return new AiGenerationOutcome
+            {
+                IsAccepted = false,
+                Validation = notFoundVal,
+                ErrorReason = notFoundVal.Issues[0].Message,
+                RepairAttemptsUsed = 0,
+                FailedChunkId = chunkId
+            };
+        }
+
+        return await GenerateAndValidateIrAsync(chunk.Candidates, policy, userApprovedExternalAi, ct);
+    }
+
+    private async Task<AiGenerationOutcome?> TryFallbackGenerationAsync(
+        IAiProvider activeProvider,
+        IReadOnlyList<NormalizedActionCandidate> safeCandidates,
+        IReadOnlyList<LogChunk> chunks,
+        PolicyDeclaration policy,
+        bool externalApproved,
+        int baseFilteredOutCount,
+        CancellationToken ct)
+    {
+        try
+        {
+            // 1. 必須意図・高優先度フィルタリングによるフォールバック
+            var essentialFiltered = LogFilterService.FilterCandidatesByTokenBudget(
+                safeCandidates,
+                _chunkingOptions.MaxTokensPerChunk,
+                out int extraFilteredCount,
+                IntentPriorityKind.High);
+
+            if (essentialFiltered.Count > 0 && essentialFiltered.Count < safeCandidates.Count)
+            {
+                int filteredTokens = TokenEstimator.EstimateTotalTokens(essentialFiltered);
+                int totalFiltered = baseFilteredOutCount + extraFilteredCount;
+                string json = await activeProvider.GenerateWorkflowIrJsonAsync(essentialFiltered, policy, null, ct);
+                var (val, def) = _validator.ValidateJson(json);
+                if (val.IsValid && def is not null)
+                {
+                    RecordAudit(
+                        activeProvider.ProviderName,
+                        activeProvider.ModelId,
+                        "AllStagesPassed:FilteredFallback",
+                        true,
+                        "NONE",
+                        0,
+                        externalApproved,
+                        "fallback-filtered",
+                        filteredTokens,
+                        totalFiltered);
+                    return new AiGenerationOutcome
+                    {
+                        IsAccepted = true,
+                        Definition = def,
+                        RawJson = json,
+                        Validation = val,
+                        ErrorReason = string.Empty,
+                        RepairAttemptsUsed = _maxRepairAttempts,
+                        TotalChunksCount = Math.Max(1, chunks.Count),
+                        EstimatedTokens = filteredTokens,
+                        FilteredOutEventCount = totalFiltered,
+                        UsedFallbackGeneration = true,
+                        ProcessedChunkIds = chunks.Select(c => c.ChunkId).ToList()
+                    };
+                }
+            }
+
+            // 2. チャンク単位での段階的AI生成と原因特定監査ログ記録
+            if (chunks.Count > 1)
+            {
+                var mergedNodes = new List<WorkflowNode>();
+                var mergedOrigins = new List<OriginRule>(policy.AllowedOrigins);
+                var processedChunkIds = new List<string>();
+                int totalChunkTokens = 0;
+                int totalFilteredEvents = baseFilteredOutCount;
+                int stepCounter = 1;
+
+                foreach (var chunk in chunks)
+                {
+                    var chunkCandidates = LogFilterService.FilterCandidatesByTokenBudget(
+                        chunk.Candidates,
+                        _chunkingOptions.MaxTokensPerChunk,
+                        out int chunkFilteredOut);
+
+                    int chunkTokens = TokenEstimator.EstimateTotalTokens(chunkCandidates);
+                    totalChunkTokens += chunkTokens;
+                    totalFilteredEvents += chunkFilteredOut;
+
+                    IReadOnlyList<ValidationIssue>? chunkPrevIssues = null;
+                    ValidationResult chunkVal = new();
+                    WorkflowDefinition? chunkDef = null;
+
+                    for (int attempt = 0; attempt <= _maxRepairAttempts; attempt++)
+                    {
+                        string chunkJson = await activeProvider.GenerateWorkflowIrJsonAsync(
+                            chunkCandidates,
+                            policy,
+                            chunkPrevIssues,
+                            ct);
+                        (chunkVal, chunkDef) = _validator.ValidateJson(chunkJson);
+                        if (chunkVal.IsValid && chunkDef is not null)
+                        {
+                            RecordAudit(
+                                activeProvider.ProviderName,
+                                activeProvider.ModelId,
+                                "AllStagesPassed:ChunkStaged",
+                                true,
+                                "NONE",
+                                attempt,
+                                externalApproved,
+                                chunk.ChunkId,
+                                chunkTokens,
+                                chunk.FilteredOutEventCount + chunkFilteredOut);
+                            break;
+                        }
+                        chunkPrevIssues = chunkVal.Issues;
+                    }
+
+                    if (!chunkVal.IsValid || chunkDef is null)
+                    {
+                        string errCode = chunkVal.Issues.FirstOrDefault()?.Code ?? "CHUNK_VALIDATION_FAILED";
+                        string stages = string.Join(",", chunkVal.Issues.Select(i => i.Stage.ToString()).Distinct());
+                        RecordAudit(
+                            activeProvider.ProviderName,
+                            activeProvider.ModelId,
+                            stages,
+                            false,
+                            errCode,
+                            _maxRepairAttempts,
+                            externalApproved,
+                            chunk.ChunkId,
+                            chunkTokens,
+                            chunk.FilteredOutEventCount + chunkFilteredOut);
+
+                        return new AiGenerationOutcome
+                        {
+                            IsAccepted = false,
+                            Validation = chunkVal,
+                            ErrorReason = $"Chunk '{chunk.ChunkId}' failed validation: " +
+                                          string.Join("; ", chunkVal.Issues.Select(i => $"[{i.Code}] {i.Message}")),
+                            RepairAttemptsUsed = _maxRepairAttempts,
+                            TotalChunksCount = chunks.Count,
+                            EstimatedTokens = totalChunkTokens,
+                            FilteredOutEventCount = totalFilteredEvents,
+                            FailedChunkId = chunk.ChunkId,
+                            UsedFallbackGeneration = true,
+                            ProcessedChunkIds = processedChunkIds
+                        };
+                    }
+
+                    processedChunkIds.Add(chunk.ChunkId);
+                    foreach (var origin in chunkDef.Policy.AllowedOrigins)
+                    {
+                        if (!mergedOrigins.Any(o =>
+                                string.Equals(o.Scheme, origin.Scheme, StringComparison.OrdinalIgnoreCase) &&
+                                string.Equals(o.Host, origin.Host, StringComparison.OrdinalIgnoreCase) &&
+                                o.Port == origin.Port))
+                        {
+                            mergedOrigins.Add(origin);
+                        }
+                    }
+
+                    if (chunkDef.Root?.Children is { Count: > 0 })
+                    {
+                        foreach (var child in chunkDef.Root.Children)
+                        {
+                            child.NodeId = $"step-{stepCounter++}";
+                            mergedNodes.Add(child);
+                        }
+                    }
+                }
+
+                if (mergedNodes.Count > 0)
+                {
+                    var mergedWorkflow = new WorkflowDefinition
+                    {
+                        SchemaVersion = IrConstants.CurrentSchemaVersion,
+                        WorkflowId = $"wf-ai-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}",
+                        Name = "記録から自動作成したマクロ（チャンク統合）",
+                        Version = 1,
+                        Policy = new PolicyDeclaration
+                        {
+                            AllowedOrigins = mergedOrigins,
+                            AllowCoordinateClick = policy.AllowCoordinateClick,
+                            AllowExternalAi = policy.AllowExternalAi,
+                            AllowedExcelDirectories = policy.AllowedExcelDirectories
+                        },
+                        Root = new WorkflowNode
+                        {
+                            NodeId = "root",
+                            Type = IrConstants.NodeTypeSequence,
+                            Children = mergedNodes
+                        }
+                    };
+
+                    string mergedJson = JsonSerializer.Serialize(
+                        mergedWorkflow,
+                        new JsonSerializerOptions { WriteIndented = true });
+                    var (mergedValidation, validatedDef) = _validator.ValidateJson(mergedJson);
+                    if (mergedValidation.IsValid && validatedDef is not null)
+                    {
+                        return new AiGenerationOutcome
+                        {
+                            IsAccepted = true,
+                            Definition = validatedDef,
+                            RawJson = mergedJson,
+                            Validation = mergedValidation,
+                            ErrorReason = string.Empty,
+                            RepairAttemptsUsed = 0,
+                            TotalChunksCount = chunks.Count,
+                            EstimatedTokens = totalChunkTokens,
+                            FilteredOutEventCount = totalFilteredEvents,
+                            UsedFallbackGeneration = true,
+                            ProcessedChunkIds = processedChunkIds
+                        };
+                    }
+                }
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // モックプロバイダー等で追加レスポンスが未定義の場合は元の検証結果へ委譲する
+        }
+
+        return null;
     }
 
     private static IReadOnlyList<NormalizedActionCandidate> SanitizeCandidatesForExternalAi(
@@ -425,17 +782,30 @@ public sealed class AiOrchestrator
         bool accepted,
         string errorClassification,
         int repairCount,
-        bool externalApproved)
+        bool externalApproved,
+        string? chunkId = null,
+        int estimatedTokens = 0,
+        int filteredOutEventCount = 0)
     {
-        _repository.InsertAiAuditLog(new AiAuditRecord(
-            AuditId: $"aiaudit-{Guid.NewGuid():N}",
-            ProviderName: providerName,
-            ModelId: modelId,
-            ValidationStageSummary: stageSummary,
-            IsAccepted: accepted,
-            ErrorClassification: errorClassification,
-            RepairAttemptCount: repairCount,
-            ExternalSendApproved: externalApproved,
-            Timestamp: DateTimeOffset.UtcNow));
+        string formattedStageSummary = AiAuditMetadataFormatter.FormatStageSummaryWithMetadata(
+            stageSummary,
+            chunkId,
+            estimatedTokens,
+            filteredOutEventCount);
+
+        _repository.InsertAiAuditLog(
+            new AiAuditRecord(
+                AuditId: $"aiaudit-{Guid.NewGuid():N}",
+                ProviderName: providerName,
+                ModelId: modelId,
+                ValidationStageSummary: formattedStageSummary,
+                IsAccepted: accepted,
+                ErrorClassification: errorClassification,
+                RepairAttemptCount: repairCount,
+                ExternalSendApproved: externalApproved,
+                Timestamp: DateTimeOffset.UtcNow),
+            chunkId,
+            estimatedTokens,
+            filteredOutEventCount);
     }
 }

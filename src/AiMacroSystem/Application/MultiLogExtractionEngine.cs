@@ -29,13 +29,32 @@ public sealed partial class MultiLogExtractionEngine
 
     public IReadOnlyList<NormalizedActionCandidate> ExtractCandidates(IReadOnlyList<RawRecordedEvent> rawEvents)
     {
+        var (candidates, _) = ExtractCandidatesWithSummary(rawEvents);
+        return candidates;
+    }
+
+    public (IReadOnlyList<NormalizedActionCandidate> Candidates, LogFilterSummary Summary) ExtractCandidatesWithSummary(
+        IReadOnlyList<RawRecordedEvent> rawEvents)
+    {
         if (rawEvents.Count == 0)
         {
-            return Array.Empty<NormalizedActionCandidate>();
+            var emptySummary = new LogFilterSummary(
+                Array.Empty<RawRecordedEvent>(),
+                Array.Empty<NormalizedActionCandidate>(),
+                0,
+                0,
+                0,
+                0);
+            return (Array.Empty<NormalizedActionCandidate>(), emptySummary);
         }
 
+        int originalTokens = TokenEstimator.EstimateTotalTokens(rawEvents);
+        var (cleanedEvents, preFilteredNoiseCount) = LogFilterService.FilterNoiseRawEvents(
+            rawEvents,
+            _options.IncrementalInputDebounceWindow);
+
         // 元の出現順序を保ちつつタイムスタンプ順に整列
-        var orderedEvents = rawEvents
+        var orderedEvents = cleanedEvents
             .Select((ev, index) => (Event: ev, Index: index))
             .OrderBy(x => x.Event.Timestamp)
             .ThenBy(x => x.Index)
@@ -72,7 +91,21 @@ public sealed partial class MultiLogExtractionEngine
             results.Add(SynthesizeCandidate(cluster));
         }
 
-        return results;
+        var usedRawIds = results
+            .SelectMany(c => c.SourceRawEventIds)
+            .ToHashSet(StringComparer.Ordinal);
+        int totalFilteredOut = Math.Max(preFilteredNoiseCount, rawEvents.Count - usedRawIds.Count);
+        int candidateTokens = TokenEstimator.EstimateTotalTokens(results);
+
+        var summary = new LogFilterSummary(
+            KeptRawEvents: cleanedEvents,
+            KeptCandidates: results,
+            OriginalRawEventCount: rawEvents.Count,
+            FilteredOutEventCount: totalFilteredOut,
+            OriginalEstimatedTokens: originalTokens,
+            FilteredEstimatedTokens: candidateTokens);
+
+        return (results, summary);
     }
 
     internal static bool IsNoiseOrContextOnlyEvent(RawRecordedEvent ev) =>

@@ -145,13 +145,28 @@ public sealed partial class SqliteRepository
         return list;
     }
 
-    public void InsertAiAuditLog(AiAuditRecord record)
+    public void InsertAiAuditLog(
+        AiAuditRecord record,
+        string? chunkId = null,
+        int estimatedTokens = 0,
+        int filteredOutEventCount = 0)
     {
         using var conn = OpenConnection();
+        EnsureLogChunkAndAuditSchema(conn);
+
+        var parsed = AiAuditMetadataFormatter.ParseMetadata(record.ValidationStageSummary);
+        string? resolvedChunkId = chunkId ?? parsed.ChunkId;
+        int resolvedTokens = estimatedTokens > 0 ? estimatedTokens : parsed.EstimatedTokens;
+        int resolvedFiltered = filteredOutEventCount > 0 ? filteredOutEventCount : parsed.FilteredOutEventCount;
+
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO AiAuditLogs (AuditId, ProviderName, ModelId, ValidationStageSummary, IsAccepted, ErrorClassification, RepairAttemptCount, ExternalSendApproved, Timestamp)
-            VALUES ($id, $p, $m, $s, $acc, $err, $rep, $ext, $ts);
+            INSERT INTO AiAuditLogs (
+                AuditId, ProviderName, ModelId, ValidationStageSummary, IsAccepted,
+                ErrorClassification, RepairAttemptCount, ExternalSendApproved, Timestamp,
+                ChunkId, EstimatedTokens, FilteredOutEventCount
+            )
+            VALUES ($id, $p, $m, $s, $acc, $err, $rep, $ext, $ts, $cid, $tok, $flt);
             """;
         cmd.Parameters.AddWithValue("$id", record.AuditId);
         cmd.Parameters.AddWithValue("$p", record.ProviderName);
@@ -162,6 +177,9 @@ public sealed partial class SqliteRepository
         cmd.Parameters.AddWithValue("$rep", record.RepairAttemptCount);
         cmd.Parameters.AddWithValue("$ext", record.ExternalSendApproved ? 1 : 0);
         cmd.Parameters.AddWithValue("$ts", record.Timestamp.ToString("O"));
+        cmd.Parameters.AddWithValue("$cid", (object?)resolvedChunkId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$tok", resolvedTokens);
+        cmd.Parameters.AddWithValue("$flt", resolvedFiltered);
         cmd.ExecuteNonQuery();
     }
 
@@ -327,5 +345,175 @@ public sealed partial class SqliteRepository
                 reader.IsDBNull(10) ? null : reader.GetString(10)));
         }
         return list;
+    }
+
+    public void SaveLogChunk(LogChunk chunk)
+    {
+        using var conn = OpenConnection();
+        EnsureLogChunkAndAuditSchema(conn);
+        UpsertLogChunkInternal(conn, null, chunk);
+    }
+
+    public void SaveLogChunks(IEnumerable<LogChunk> chunks, bool replaceExisting = true)
+    {
+        using var conn = OpenConnection();
+        EnsureLogChunkAndAuditSchema(conn);
+        using var tx = conn.BeginTransaction();
+
+        if (replaceExisting)
+        {
+            using var clearCmd = conn.CreateCommand();
+            clearCmd.Transaction = tx;
+            clearCmd.CommandText = "DELETE FROM RecordedLogChunks;";
+            clearCmd.ExecuteNonQuery();
+        }
+
+        foreach (var chunk in chunks)
+        {
+            UpsertLogChunkInternal(conn, tx, chunk);
+        }
+
+        tx.Commit();
+    }
+
+    public IReadOnlyList<LogChunk> GetLogChunks()
+    {
+        using var conn = OpenConnection();
+        EnsureLogChunkAndAuditSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT ChunkId, SequenceIndex, EstimatedTokens, AppCategory, StartTime, EndTime,
+                   RawEventIdsJson, CandidateIdsJson, CandidatesJson, FilteredOutEventCount
+            FROM RecordedLogChunks
+            ORDER BY SequenceIndex ASC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        var list = new List<LogChunk>();
+        while (reader.Read())
+        {
+            list.Add(ReadLogChunkRow(reader));
+        }
+        return list;
+    }
+
+    public LogChunk? GetLogChunkById(string chunkId)
+    {
+        using var conn = OpenConnection();
+        EnsureLogChunkAndAuditSchema(conn);
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT ChunkId, SequenceIndex, EstimatedTokens, AppCategory, StartTime, EndTime,
+                   RawEventIdsJson, CandidateIdsJson, CandidatesJson, FilteredOutEventCount
+            FROM RecordedLogChunks
+            WHERE ChunkId = $cid;
+            """;
+        cmd.Parameters.AddWithValue("$cid", chunkId);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadLogChunkRow(reader) : null;
+    }
+
+    private static void UpsertLogChunkInternal(SqliteConnection conn, SqliteTransaction? tx, LogChunk chunk)
+    {
+        var sanitizedCandidates = chunk.Candidates.Select(c => c with
+        {
+            TargetUrlOrWorkbook = SensitiveDataProtector.SanitizeText(c.TargetUrlOrWorkbook),
+            SanitizedValue = c.IsSensitive
+                ? SensitiveDataProtector.RedactedPlaceholder
+                : SensitiveDataProtector.SanitizeText(c.SanitizedValue)
+        }).ToList();
+
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO RecordedLogChunks (
+                ChunkId, SequenceIndex, EstimatedTokens, AppCategory, StartTime, EndTime,
+                RawEventIdsJson, CandidateIdsJson, CandidatesJson, FilteredOutEventCount
+            ) VALUES (
+                $cid, $seq, $tok, $app, $st, $et, $rawIds, $candIds, $cands, $flt
+            );
+            """;
+        cmd.Parameters.AddWithValue("$cid", chunk.ChunkId);
+        cmd.Parameters.AddWithValue("$seq", chunk.SequenceIndex);
+        cmd.Parameters.AddWithValue("$tok", chunk.EstimatedTokens);
+        cmd.Parameters.AddWithValue("$app", chunk.AppCategory);
+        cmd.Parameters.AddWithValue("$st", chunk.StartTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$et", chunk.EndTime.ToString("O"));
+        cmd.Parameters.AddWithValue("$rawIds", JsonSerializer.Serialize(chunk.RawEventIds));
+        cmd.Parameters.AddWithValue("$candIds", JsonSerializer.Serialize(chunk.CandidateIds));
+        cmd.Parameters.AddWithValue("$cands", JsonSerializer.Serialize(sanitizedCandidates));
+        cmd.Parameters.AddWithValue("$flt", chunk.FilteredOutEventCount);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static LogChunk ReadLogChunkRow(SqliteDataReader reader)
+    {
+        var rawIds = JsonSerializer.Deserialize<List<string>>(reader.GetString(6)) ?? new List<string>();
+        var candIds = JsonSerializer.Deserialize<List<string>>(reader.GetString(7)) ?? new List<string>();
+        var candidates = JsonSerializer.Deserialize<List<NormalizedActionCandidate>>(reader.GetString(8))
+                         ?? new List<NormalizedActionCandidate>();
+
+        return new LogChunk(
+            ChunkId: reader.GetString(0),
+            SequenceIndex: reader.GetInt32(1),
+            EstimatedTokens: reader.GetInt32(2),
+            AppCategory: reader.GetString(3),
+            StartTime: DateTimeOffset.Parse(reader.GetString(4)),
+            EndTime: DateTimeOffset.Parse(reader.GetString(5)),
+            RawEventIds: rawIds,
+            CandidateIds: candIds,
+            Candidates: candidates,
+            FilteredOutEventCount: reader.IsDBNull(9) ? 0 : reader.GetInt32(9));
+    }
+
+    private static void EnsureLogChunkAndAuditSchema(SqliteConnection conn)
+    {
+        using (var tableCmd = conn.CreateCommand())
+        {
+            tableCmd.CommandText = """
+                CREATE TABLE IF NOT EXISTS RecordedLogChunks (
+                    ChunkId TEXT PRIMARY KEY,
+                    SequenceIndex INTEGER NOT NULL,
+                    EstimatedTokens INTEGER NOT NULL,
+                    AppCategory TEXT NOT NULL,
+                    StartTime TEXT NOT NULL,
+                    EndTime TEXT NOT NULL,
+                    RawEventIdsJson TEXT NOT NULL,
+                    CandidateIdsJson TEXT NOT NULL,
+                    CandidatesJson TEXT NOT NULL,
+                    FilteredOutEventCount INTEGER NOT NULL DEFAULT 0
+                );
+                """;
+            tableCmd.ExecuteNonQuery();
+        }
+
+        var existingCols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var pragmaCmd = conn.CreateCommand())
+        {
+            pragmaCmd.CommandText = "PRAGMA table_info(AiAuditLogs);";
+            using var reader = pragmaCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                existingCols.Add(reader.GetString(1));
+            }
+        }
+
+        if (!existingCols.Contains("ChunkId"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE AiAuditLogs ADD COLUMN ChunkId TEXT;";
+            alter.ExecuteNonQuery();
+        }
+        if (!existingCols.Contains("EstimatedTokens"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE AiAuditLogs ADD COLUMN EstimatedTokens INTEGER NOT NULL DEFAULT 0;";
+            alter.ExecuteNonQuery();
+        }
+        if (!existingCols.Contains("FilteredOutEventCount"))
+        {
+            using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE AiAuditLogs ADD COLUMN FilteredOutEventCount INTEGER NOT NULL DEFAULT 0;";
+            alter.ExecuteNonQuery();
+        }
     }
 }
