@@ -427,9 +427,9 @@ public sealed partial class MultiLogExtractionEngine
 
     private static bool MatchesAnySemanticIdentifier(EventCluster cluster, RawRecordedEvent current)
     {
-        var currentNames = new[] { current.TargetName, current.TargetLabel }
-            .Where(s => !string.IsNullOrWhiteSpace(s))
-            .ToList();
+        var currentNames = new List<string>();
+        if (!string.IsNullOrWhiteSpace(current.TargetName)) currentNames.Add(current.TargetName);
+        if (!string.IsNullOrWhiteSpace(current.TargetLabel)) currentNames.Add(current.TargetLabel);
 
         foreach (var prev in cluster.Events)
         {
@@ -444,13 +444,13 @@ public sealed partial class MultiLogExtractionEngine
                 return true;
             }
 
-            var prevNames = new[] { prev.TargetName, prev.TargetLabel }
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .ToList();
+            var prevNames = new List<string>();
+            if (!string.IsNullOrWhiteSpace(prev.TargetName)) prevNames.Add(prev.TargetName);
+            if (!string.IsNullOrWhiteSpace(prev.TargetLabel)) prevNames.Add(prev.TargetLabel);
 
-            foreach (var pn in prevNames)
+            foreach (string pn in prevNames)
             {
-                foreach (var cn in currentNames)
+                foreach (string cn in currentNames)
                 {
                     if (string.Equals(pn, cn, StringComparison.OrdinalIgnoreCase) ||
                         pn.Contains(cn, StringComparison.OrdinalIgnoreCase) ||
