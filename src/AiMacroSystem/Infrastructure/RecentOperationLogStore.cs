@@ -35,16 +35,63 @@ public sealed class RecentOperationLogStore
     {
         _options = options ?? new RecentOperationLogOptions();
         LogDirectoryPath = string.IsNullOrWhiteSpace(logDirectoryPath)
-            ? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "AiMacroSystem",
-                "logs")
+            ? ResolveDefaultLogDirectory()
             : Path.GetFullPath(logDirectoryPath);
 
         Directory.CreateDirectory(LogDirectoryPath);
         LatestLogFilePath = Path.Combine(LogDirectoryPath, LatestLogFileName);
         _currentSessionId = $"session-{DateTimeOffset.Now:yyyyMMdd-HHmmss-fff}";
         _currentSessionFilePath = Path.Combine(LogDirectoryPath, $"{_currentSessionId}.txt");
+    }
+
+    public static string ResolveDefaultLogDirectory()
+    {
+        // 起動方法に依存せずプロジェクトディレクトリ内の logs へ出力するため、上位階層のマーカーを探索する
+        string? root = FindRootByMarker(AppContext.BaseDirectory, checkSolutionOrGit: true)
+                       ?? FindRootByMarker(Directory.GetCurrentDirectory(), checkSolutionOrGit: true)
+                       ?? FindRootByMarker(AppContext.BaseDirectory, checkSolutionOrGit: false)
+                       ?? FindRootByMarker(Directory.GetCurrentDirectory(), checkSolutionOrGit: false);
+
+        string baseDir = !string.IsNullOrWhiteSpace(root) ? root : AppContext.BaseDirectory;
+        return Path.Combine(baseDir, "logs");
+    }
+
+    private static string? FindRootByMarker(string? startDirectory, bool checkSolutionOrGit)
+    {
+        if (string.IsNullOrWhiteSpace(startDirectory))
+        {
+            return null;
+        }
+
+        try
+        {
+            var dir = new DirectoryInfo(startDirectory);
+            for (int depth = 0; dir is not null && depth < 12; depth++, dir = dir.Parent)
+            {
+                if (!dir.Exists)
+                {
+                    continue;
+                }
+
+                if (checkSolutionOrGit)
+                {
+                    if (File.Exists(Path.Combine(dir.FullName, "AiMacroSystem.sln")) ||
+                        Directory.Exists(Path.Combine(dir.FullName, ".git")))
+                    {
+                        return dir.FullName;
+                    }
+                }
+                else if (dir.EnumerateFiles("*.csproj", SearchOption.TopDirectoryOnly).Any())
+                {
+                    return dir.FullName;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     public void BeginSession()

@@ -108,7 +108,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
     public RecordingService RecordingService => _recordingService;
     public LiveChromeBrowserDriver? LiveBrowserDriver => _liveBrowserDriver;
     public string RecentLogDirectoryPath => _logStore?.LogDirectoryPath ??
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AiMacroSystem", "logs");
+        RecentOperationLogStore.ResolveDefaultLogDirectory();
     public string LatestTextLogPath => _logStore?.LatestLogFilePath ??
         Path.Combine(RecentLogDirectoryPath, RecentOperationLogStore.LatestLogFileName);
 

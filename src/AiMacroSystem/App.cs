@@ -58,7 +58,7 @@ public sealed class App : System.Windows.Application
             "AiMacroSystem");
         Directory.CreateDirectory(appDataDir);
         string dbPath = Path.Combine(appDataDir, "aimacro-v07.sqlite");
-        string logDir = Path.Combine(appDataDir, "logs");
+        string logDir = RecentOperationLogStore.ResolveDefaultLogDirectory();
 
         var recentLogStore = new RecentOperationLogStore(logDir);
         var repository = new SqliteRepository(dbPath);
