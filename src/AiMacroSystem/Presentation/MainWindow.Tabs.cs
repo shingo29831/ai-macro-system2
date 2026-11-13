@@ -1,4 +1,6 @@
 // Module: @role: MainWindowのマクロ一覧タブおよび操作記録タブのUI構築を担当するPartialクラス
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
@@ -99,13 +101,34 @@ public sealed partial class MainWindow
         var headerDock = new DockPanel { Margin = new Thickness(0, 0, 0, 12) };
         var rightActions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
 
+        var openLogFileBtn = CreateButton("📄 最新テキストログを開く", _accentNeutral, _textPrimary, isCompact: true);
+        openLogFileBtn.Margin = new Thickness(0, 0, 8, 0);
+        openLogFileBtn.Click += (_, _) =>
+        {
+            Directory.CreateDirectory(_vm.RecentLogDirectoryPath);
+            string target = File.Exists(_vm.LatestTextLogPath) ? _vm.LatestTextLogPath : _vm.RecentLogDirectoryPath;
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true });
+        };
+        rightActions.Children.Add(openLogFileBtn);
+
+        var openLogDirBtn = CreateButton("📂 ログフォルダを開く", _accentNeutral, _textPrimary, isCompact: true);
+        openLogDirBtn.Margin = new Thickness(0, 0, 8, 0);
+        openLogDirBtn.Click += (_, _) =>
+        {
+            Directory.CreateDirectory(_vm.RecentLogDirectoryPath);
+            Process.Start(new ProcessStartInfo(_vm.RecentLogDirectoryPath) { UseShellExecute = true });
+        };
+        rightActions.Children.Add(openLogDirBtn);
+
         var aiGenBtn = CreateButton("✨ 記録ログから手順を再生成", _accentNeutral, _textPrimary, isCompact: true);
         aiGenBtn.Click += async (_, _) => await _vm.GenerateMacroFromRecordingViaAiAsync();
         rightActions.Children.Add(aiGenBtn);
 
         DockPanel.SetDock(rightActions, Dock.Right);
         headerDock.Children.Add(rightActions);
-        headerDock.Children.Add(CreateSectionHeader("操作の記録とマクロ変換", "ブラウザ・Excel・アプリの操作を自動で検出し、手順ブロックへ変換します"));
+        headerDock.Children.Add(CreateSectionHeader(
+            "操作の記録とマクロ変換",
+            $"ブラウザ・Excel・アプリの操作を自動検出し、最近のログのみをテキスト出力（{_vm.RecentLogDirectoryPath}）して手順化します"));
         DockPanel.SetDock(headerDock, Dock.Top);
         dock.Children.Add(headerDock);
 

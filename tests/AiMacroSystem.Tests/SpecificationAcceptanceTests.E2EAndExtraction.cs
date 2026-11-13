@@ -299,4 +299,105 @@ public sealed partial class SpecificationAcceptanceTests
         Assert.Equal("wf-cross-app-saved", vm.SelectedMacroInList!.WorkflowId);
         Assert.Equal("ブラウザからExcelへの売上転記マクロ", vm.SelectedMacroInList.Name);
     }
+
+    [Fact]
+    public async Task Section18_14_RecentOperationLogStore_WritesRecentTextLogs_AndPrunesOldLogsAndEvents()
+    {
+        string tempLogDir = Path.Combine(Path.GetTempPath(), $"aimacro-logs-{Guid.NewGuid():N}");
+        try
+        {
+            var logOptions = new RecentOperationLogOptions
+            {
+                MaxRetainedSessionFiles = 2,
+                MaxFileAge = TimeSpan.FromDays(1),
+                MaxEventsPerTextFile = 50,
+                RecentEventWindow = TimeSpan.FromMinutes(10)
+            };
+            var logStore = new RecentOperationLogStore(tempLogDir, logOptions);
+            Assert.True(Directory.Exists(tempLogDir));
+
+            // 保持上限・期限を超えた古いセッションファイルが自動削除されることを確認
+            string expiredFile = Path.Combine(tempLogDir, "session-20200101-000000-000.txt");
+            string oldFile1 = Path.Combine(tempLogDir, "session-20261101-000000-001.txt");
+            string oldFile2 = Path.Combine(tempLogDir, "session-20261101-000000-002.txt");
+            File.WriteAllText(expiredFile, "expired");
+            File.SetLastWriteTimeUtc(expiredFile, DateTime.UtcNow.AddDays(-5));
+            File.WriteAllText(oldFile1, "old-1");
+            File.SetLastWriteTimeUtc(oldFile1, DateTime.UtcNow.AddMinutes(-30));
+            File.WriteAllText(oldFile2, "old-2");
+            File.SetLastWriteTimeUtc(oldFile2, DateTime.UtcNow.AddMinutes(-20));
+
+            var recorder = new RecordingService(_repository, logStore);
+            var normalizer = new NormalizationService(_repository, logStore: logStore);
+            var localAi = new LocalBuiltInAiProvider();
+            var orchestrator = new AiOrchestrator(localAi, null, _validator, _repository, logStore: logStore);
+
+            // 事前に古いセッションの生ログがDBに残っている状況を再現
+            recorder.StartRecording();
+            var tNow = DateTimeOffset.UtcNow;
+            recorder.RecordEvent("Chrome", "Navigate", null, null, null, null, null,
+                "https://old-unused.example.com", null, null, null,
+                logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.99, timestampOverride: tNow.AddHours(-3));
+            recorder.StopRecording();
+
+            // 新しい記録セッションを開始し、時間窓外の古いイベントと直近イベント＋機密入力を記録
+            recorder.StartRecording();
+            Assert.False(File.Exists(expiredFile));
+            Assert.True(Directory.GetFiles(tempLogDir, "session-*.txt").Length <= 3);
+
+            string excelPath = Path.Combine(Path.GetTempPath(), $"RecentLog-{Guid.NewGuid():N}.xlsx");
+            var staleEvent = recorder.RecordEvent("CustomApp", "Input", "text", "textbox", "OldSearch", "OldSearch", "old-id",
+                "WindowsSearch", null, null, "ex",
+                logSource: LogSourceConstants.CustomAppHook, sourceConfidence: 0.9, timestampOverride: tNow.AddHours(-2));
+            var secretEvent = recorder.RecordEvent("Chrome", "Input", "password", "textbox", "Password", "パスワード", "pwd-1",
+                "https://example.com/login", null, null, "SuperSecret123!",
+                logSource: LogSourceConstants.BrowserDom, sourceConfidence: 0.99, timestampOverride: tNow.AddSeconds(-2));
+            var recentExcelEvent = recorder.RecordEvent("Excel", "Write", null, null, null, null, null,
+                excelPath, "Sheet1", "A1", "1",
+                logSource: LogSourceConstants.ExcelCom, sourceConfidence: 0.99, timestampOverride: tNow);
+            recorder.StopRecording();
+
+            var recordedAll = recorder.GetRecordedEvents();
+            Assert.Equal(3, recordedAll.Count);
+
+            var (candidates, chunks) = normalizer.NormalizeAndChunk(recordedAll);
+            Assert.DoesNotContain(candidates, c => c.SourceRawEventIds.Contains(staleEvent.EventId));
+            Assert.Contains(candidates, c => c.SourceRawEventIds.Contains(secretEvent.EventId));
+            Assert.Contains(candidates, c => c.SourceRawEventIds.Contains(recentExcelEvent.EventId));
+            Assert.Single(chunks);
+
+            var policy = new PolicyDeclaration
+            {
+                AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
+                AllowedExcelDirectories = new List<string> { Path.GetDirectoryName(excelPath)! }
+            };
+            var outcome = await orchestrator.GenerateAndValidateIrAsync(
+                candidates,
+                policy,
+                userApprovedExternalAi: false,
+                CancellationToken.None,
+                logStore.FilterRecentEvents(recordedAll));
+
+            Assert.True(outcome.IsAccepted);
+            Assert.True(File.Exists(logStore.LatestLogFilePath));
+
+            string logText = File.ReadAllText(logStore.LatestLogFilePath);
+            Assert.Contains("## RawEvents", logText);
+            Assert.Contains("## NormalizedCandidates", logText);
+            Assert.Contains("## AiGeneration", logText);
+            Assert.Contains("Status: ACCEPTED", logText);
+            Assert.Contains("TrimmedOld: 1", logText);
+            Assert.DoesNotContain("OldSearch", logText);
+            Assert.DoesNotContain("SuperSecret123!", logText);
+            Assert.Contains(SensitiveDataProtector.RedactedPlaceholder, logText);
+            Assert.True(Directory.GetFiles(tempLogDir, "session-*.txt").Length <= logOptions.MaxRetainedSessionFiles);
+        }
+        finally
+        {
+            if (Directory.Exists(tempLogDir))
+            {
+                Directory.Delete(tempLogDir, recursive: true);
+            }
+        }
+    }
 }

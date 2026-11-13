@@ -27,6 +27,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
     private readonly LiveChromeBrowserDriver? _liveBrowserDriver;
     private readonly ILiveOperationLogCollector? _liveLogCollector;
     private readonly LiveCustomAppDriver? _liveCustomAppDriver;
+    private readonly RecentOperationLogStore? _logStore;
 
     public Func<IReadOnlyList<AppTargetPromptRequest>, Task<IReadOnlyDictionary<string, WindowTargetSelection>?>>? ConfirmExecutionTargetsAsync { get; set; }
 
@@ -82,7 +83,8 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         AiOrchestrator? aiOrchestrator = null,
         LiveChromeBrowserDriver? liveBrowserDriver = null,
         ILiveOperationLogCollector? liveLogCollector = null,
-        LiveCustomAppDriver? liveCustomAppDriver = null)
+        LiveCustomAppDriver? liveCustomAppDriver = null,
+        RecentOperationLogStore? logStore = null)
     {
         _repository = repository;
         _workflowService = workflowService;
@@ -96,6 +98,7 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
         _liveBrowserDriver = liveBrowserDriver;
         _liveLogCollector = liveLogCollector;
         _liveCustomAppDriver = liveCustomAppDriver;
+        _logStore = logStore;
         if (_liveBrowserDriver is not null)
         {
             _openSystemBrowserOnNavigate = _liveBrowserDriver.LaunchSystemBrowserOnNavigate;
@@ -104,6 +107,10 @@ public sealed partial class MainViewModel : INotifyPropertyChanged
 
     public RecordingService RecordingService => _recordingService;
     public LiveChromeBrowserDriver? LiveBrowserDriver => _liveBrowserDriver;
+    public string RecentLogDirectoryPath => _logStore?.LogDirectoryPath ??
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AiMacroSystem", "logs");
+    public string LatestTextLogPath => _logStore?.LatestLogFilePath ??
+        Path.Combine(RecentLogDirectoryPath, RecentOperationLogStore.LatestLogFileName);
 
     public ObservableCollection<WorkflowVersionRecord> WorkflowVersions { get; } = new();
     public ObservableCollection<WorkflowDraftRecord> WorkflowDrafts { get; } = new();

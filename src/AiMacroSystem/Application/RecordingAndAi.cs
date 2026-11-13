@@ -92,13 +92,15 @@ public interface ILiveOperationLogCollector
 public sealed class RecordingService
 {
     private readonly SqliteRepository? _repository;
+    private readonly RecentOperationLogStore? _logStore;
     private readonly List<RawRecordedEvent> _events = new();
     private DateTimeOffset _monotonicClock = DateTimeOffset.UtcNow;
     public bool IsRecording { get; private set; }
 
-    public RecordingService(SqliteRepository? repository = null)
+    public RecordingService(SqliteRepository? repository = null, RecentOperationLogStore? logStore = null)
     {
         _repository = repository;
+        _logStore = logStore;
     }
 
     public void StartRecording()
@@ -106,6 +108,7 @@ public sealed class RecordingService
         _events.Clear();
         _monotonicClock = DateTimeOffset.UtcNow;
         IsRecording = true;
+        _logStore?.BeginSession();
     }
 
     public void StopRecording()
@@ -202,6 +205,7 @@ public sealed class RecordingService
         {
             _events.Add(ev);
             _repository?.InsertRawRecordedEvent(ev);
+            _logStore?.AppendRawEvent(ev);
         }
         return ev;
     }
@@ -226,6 +230,7 @@ public sealed class RecordingService
             {
                 _events.Add(safeEv);
                 _repository?.InsertRawRecordedEvent(safeEv);
+                _logStore?.AppendRawEvent(safeEv);
             }
             recorded.Add(safeEv);
         }
@@ -240,6 +245,7 @@ public sealed class NormalizationService
     private readonly SqliteRepository? _repository;
     private readonly MultiLogExtractionEngine _extractionEngine;
     private readonly LogChunkingOptions _chunkingOptions;
+    private readonly RecentOperationLogStore? _logStore;
 
     public IReadOnlyList<LogChunk> LastGeneratedChunks { get; private set; } = Array.Empty<LogChunk>();
     public LogFilterSummary? LastFilterSummary { get; private set; }
@@ -247,11 +253,13 @@ public sealed class NormalizationService
     public NormalizationService(
         SqliteRepository? repository = null,
         MultiLogExtractionEngine? extractionEngine = null,
-        LogChunkingOptions? chunkingOptions = null)
+        LogChunkingOptions? chunkingOptions = null,
+        RecentOperationLogStore? logStore = null)
     {
         _repository = repository;
         _extractionEngine = extractionEngine ?? new MultiLogExtractionEngine();
         _chunkingOptions = chunkingOptions ?? new LogChunkingOptions();
+        _logStore = logStore;
     }
 
     public IReadOnlyList<NormalizedActionCandidate> Normalize(IReadOnlyList<RawRecordedEvent> rawEvents)
@@ -265,7 +273,11 @@ public sealed class NormalizationService
         LogChunkingOptions? options = null)
     {
         var effectiveOptions = options ?? _chunkingOptions;
-        var (candidates, summary) = _extractionEngine.ExtractCandidatesWithSummary(rawEvents);
+        var recentRawEvents = _logStore is not null
+            ? _logStore.FilterRecentEvents(rawEvents)
+            : rawEvents;
+
+        var (candidates, summary) = _extractionEngine.ExtractCandidatesWithSummary(recentRawEvents);
         LastFilterSummary = summary;
 
         foreach (var candidate in candidates)
@@ -274,7 +286,7 @@ public sealed class NormalizationService
         }
 
         var chunks = LogChunker.BuildChunks(
-            rawEvents,
+            recentRawEvents,
             candidates,
             effectiveOptions,
             summary.FilteredOutEventCount);
@@ -285,6 +297,7 @@ public sealed class NormalizationService
             _repository?.SaveLogChunks(chunks);
         }
 
+        _logStore?.WriteSessionSummary(recentRawEvents, candidates);
         return (candidates, chunks);
     }
 }
@@ -327,6 +340,7 @@ public sealed class AiOrchestrator
     private readonly SqliteRepository _repository;
     private readonly int _maxRepairAttempts;
     private readonly LogChunkingOptions _chunkingOptions;
+    private readonly RecentOperationLogStore? _logStore;
 
     public AiOrchestrator(
         IAiProvider localProvider,
@@ -334,7 +348,8 @@ public sealed class AiOrchestrator
         IrValidator validator,
         SqliteRepository repository,
         int maxRepairAttempts = 2,
-        LogChunkingOptions? chunkingOptions = null)
+        LogChunkingOptions? chunkingOptions = null,
+        RecentOperationLogStore? logStore = null)
     {
         _localProvider = localProvider;
         _externalProvider = externalProvider;
@@ -342,12 +357,58 @@ public sealed class AiOrchestrator
         _repository = repository;
         _maxRepairAttempts = maxRepairAttempts;
         _chunkingOptions = chunkingOptions ?? new LogChunkingOptions();
+        _logStore = logStore;
     }
 
     public async Task<AiGenerationOutcome> GenerateAndValidateIrAsync(
         IReadOnlyList<NormalizedActionCandidate> candidates,
         PolicyDeclaration policy,
         bool userApprovedExternalAi,
+        CancellationToken ct,
+        IReadOnlyList<RawRecordedEvent>? sessionRawEvents = null)
+    {
+        var scopedRawEvents = ResolveRecentSessionRawEvents(candidates, sessionRawEvents);
+        var outcome = await GenerateAndValidateIrCoreAsync(
+            candidates,
+            policy,
+            userApprovedExternalAi,
+            scopedRawEvents,
+            ct);
+        _logStore?.WriteSessionSummary(scopedRawEvents, candidates, outcome);
+        return outcome;
+    }
+
+    private IReadOnlyList<RawRecordedEvent> ResolveRecentSessionRawEvents(
+        IReadOnlyList<NormalizedActionCandidate> candidates,
+        IReadOnlyList<RawRecordedEvent>? sessionRawEvents)
+    {
+        if (sessionRawEvents is not null)
+        {
+            return _logStore is not null
+                ? _logStore.FilterRecentEvents(sessionRawEvents)
+                : sessionRawEvents;
+        }
+
+        // セッションイベント未指定時でも、全履歴混入によるトークン浪費を防ぐため現候補が参照するイベントのみ抽出する
+        var allStored = _repository.GetRawRecordedEvents();
+        var referencedIds = candidates
+            .SelectMany(c => c.SourceRawEventIds)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var matched = referencedIds.Count > 0
+            ? allStored.Where(e => referencedIds.Contains(e.EventId)).ToList()
+            : allStored.ToList();
+
+        return _logStore is not null
+            ? _logStore.FilterRecentEvents(matched)
+            : matched;
+    }
+
+    private async Task<AiGenerationOutcome> GenerateAndValidateIrCoreAsync(
+        IReadOnlyList<NormalizedActionCandidate> candidates,
+        PolicyDeclaration policy,
+        bool userApprovedExternalAi,
+        IReadOnlyList<RawRecordedEvent> rawEvents,
         CancellationToken ct)
     {
         // 曖昧な候補が残っている場合はAIが勝手に推測して確定することを禁止（仕様6.3 / 7.2 / 18.2）
@@ -405,7 +466,6 @@ public sealed class AiOrchestrator
             ? SanitizeCandidatesForExternalAi(candidates)
             : candidates;
 
-        var rawEvents = _repository.GetRawRecordedEvents();
         int usedRawCount = safeCandidates.SelectMany(c => c.SourceRawEventIds).Distinct(StringComparer.Ordinal).Count();
         int baseFilteredOutCount = rawEvents.Count > usedRawCount ? rawEvents.Count - usedRawCount : 0;
 

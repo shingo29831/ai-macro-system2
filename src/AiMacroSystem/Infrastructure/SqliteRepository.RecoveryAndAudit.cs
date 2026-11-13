@@ -516,4 +516,42 @@ public sealed partial class SqliteRepository
             alter.ExecuteNonQuery();
         }
     }
+
+    public void PruneOldOperationLogs(int maxKeepRawEvents = 500, int maxKeepCandidates = 200)
+    {
+        using var conn = OpenConnection();
+        using var tx = conn.BeginTransaction();
+
+        using (var pruneRawCmd = conn.CreateCommand())
+        {
+            pruneRawCmd.Transaction = tx;
+            pruneRawCmd.CommandText = """
+                DELETE FROM RecordedRawEvents
+                WHERE EventId NOT IN (
+                    SELECT EventId FROM RecordedRawEvents
+                    ORDER BY Timestamp DESC
+                    LIMIT $limit
+                );
+                """;
+            pruneRawCmd.Parameters.AddWithValue("$limit", Math.Max(1, maxKeepRawEvents));
+            pruneRawCmd.ExecuteNonQuery();
+        }
+
+        using (var pruneCandCmd = conn.CreateCommand())
+        {
+            pruneCandCmd.Transaction = tx;
+            pruneCandCmd.CommandText = """
+                DELETE FROM NormalizedActionCandidates
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM NormalizedActionCandidates
+                    ORDER BY rowid DESC
+                    LIMIT $limit
+                );
+                """;
+            pruneCandCmd.Parameters.AddWithValue("$limit", Math.Max(1, maxKeepCandidates));
+            pruneCandCmd.ExecuteNonQuery();
+        }
+
+        tx.Commit();
+    }
 }

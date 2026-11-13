@@ -93,7 +93,11 @@ public sealed partial class MainViewModel
             return;
         }
 
-        var (candidates, chunks) = _normalizationService.NormalizeAndChunk(rawList);
+        var recentRawList = _logStore is not null
+            ? _logStore.FilterRecentEvents(rawList)
+            : rawList;
+
+        var (candidates, chunks) = _normalizationService.NormalizeAndChunk(recentRawList);
         var filterSummary = _normalizationService.LastFilterSummary;
         LastChunkCount = Math.Max(1, chunks.Count);
         LastEstimatedTokens = filterSummary?.FilteredEstimatedTokens ?? TokenEstimator.EstimateTotalTokens(candidates);
@@ -117,7 +121,7 @@ public sealed partial class MainViewModel
             TryRegisterExcelDirectory(StepExcelPathInput, allowedExcelDirs);
         }
 
-        foreach (var ev in rawList)
+        foreach (var ev in recentRawList)
         {
             TryRegisterHttpOrigin(ev.UrlOrWorkbookPath, allowedOrigins);
             TryRegisterExcelDirectory(ev.UrlOrWorkbookPath, allowedExcelDirs);
@@ -147,12 +151,18 @@ public sealed partial class MainViewModel
 
         if (_aiOrchestrator is not null)
         {
-            var outcome = await _aiOrchestrator.GenerateAndValidateIrAsync(candidates, policy, AllowExternalAiPolicy, default);
+            var outcome = await _aiOrchestrator.GenerateAndValidateIrAsync(
+                candidates,
+                policy,
+                AllowExternalAiPolicy,
+                default,
+                recentRawList);
             LastChunkCount = Math.Max(LastChunkCount, outcome.TotalChunksCount);
             if (outcome.EstimatedTokens > 0) LastEstimatedTokens = outcome.EstimatedTokens;
             LastFilteredOutEventCount = Math.Max(LastFilteredOutEventCount, outcome.FilteredOutEventCount);
             ChunkAndFilterSummaryText = $"チャンク分割: {LastChunkCount}個 / 推定トークン: {LastEstimatedTokens} / フィルタ除外: {LastFilteredOutEventCount}件";
 
+            _repository.PruneOldOperationLogs();
             RefreshAllListsFromDatabase();
 
             if (outcome.IsAccepted && outcome.RawJson is not null)
@@ -169,7 +179,7 @@ public sealed partial class MainViewModel
                 ValidateCurrentEditorIr();
                 IsEditingMode = true;
                 VisualBlocksUpdated?.Invoke();
-                StatusBanner = $"✨ 複数ログ（{rawList.Count}件）から {EasySteps.Count} 個の操作ブロックを抽出し、マクロ化しました！（{ChunkAndFilterSummaryText}）";
+                StatusBanner = $"✨ 最近の操作ログ（{recentRawList.Count}件）から {EasySteps.Count} 個の操作ブロックを抽出し、マクロ化しました！（{ChunkAndFilterSummaryText}）";
                 return;
             }
 

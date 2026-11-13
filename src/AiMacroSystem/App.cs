@@ -58,14 +58,16 @@ public sealed class App : System.Windows.Application
             "AiMacroSystem");
         Directory.CreateDirectory(appDataDir);
         string dbPath = Path.Combine(appDataDir, "aimacro-v07.sqlite");
+        string logDir = Path.Combine(appDataDir, "logs");
 
+        var recentLogStore = new RecentOperationLogStore(logDir);
         var repository = new SqliteRepository(dbPath);
         var validator = new IrValidator();
         var policyEngine = new PolicyEngine(validator);
         var approvalService = new ApprovalService();
         var workflowService = new WorkflowManagementService(repository, validator);
-        var recordingService = new RecordingService(repository);
-        var normalizationService = new NormalizationService(repository);
+        var recordingService = new RecordingService(repository, recentLogStore);
+        var normalizationService = new NormalizationService(repository, logStore: recentLogStore);
 
         var liveBrowserDriver = new LiveChromeBrowserDriver
         {
@@ -99,7 +101,7 @@ public sealed class App : System.Windows.Application
 
         var recoveryService = new RecoveryService(repository, adapters);
         var executionEngine = new ExecutionEngine(repository, policyEngine, approvalService, recoveryService, adapters);
-        var aiOrchestrator = new AiOrchestrator(localAiProvider, null, validator, repository);
+        var aiOrchestrator = new AiOrchestrator(localAiProvider, null, validator, repository, logStore: recentLogStore);
 
         var viewModel = new MainViewModel(
             repository,
@@ -113,7 +115,8 @@ public sealed class App : System.Windows.Application
             aiOrchestrator,
             liveBrowserDriver,
             liveLogMonitor,
-            liveCustomAppDriver);
+            liveCustomAppDriver,
+            recentLogStore);
 
         var app = new App();
         var window = new MainWindow(viewModel);
