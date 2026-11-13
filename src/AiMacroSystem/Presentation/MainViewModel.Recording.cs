@@ -1,6 +1,8 @@
 // Module: @role: MainViewModelの実環境操作ログ記録およびAIマクロ生成オーケストレーションを担当するPartialクラス
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using AiMacroSystem.Application;
 using AiMacroSystem.Domain;
@@ -64,18 +66,16 @@ public sealed partial class MainViewModel
         try
         {
             _liveLogCollector?.StopAndFlush();
+            _recordingService.StopRecording();
 
             if (_recordingService.GetRecordedEvents().Count == 0)
             {
-                RecordCrossAppBrowserToExcelLogs();
-                RecordSimulatedCustomAppAction();
+                RecordingProgressText = "操作ログが記録されていません";
+                StatusBanner = "⚠️ 操作ログが記録されていません。";
+                return;
             }
 
-            _recordingService.StopRecording();
             await GenerateMacroFromRecordingViaAiAsync();
-            IsEditingMode = true;
-            VisualBlocksUpdated?.Invoke();
-            StatusBanner = $"✨ 複数アプリ（ブラウザ・Excel・独自アプリ）のログから {EasySteps.Count} ブロックのマクロを自動生成しました！「💾 マクロを保存」で保存できます。";
         }
         finally
         {
@@ -88,7 +88,8 @@ public sealed partial class MainViewModel
         var rawList = _recordingService.GetRecordedEvents();
         if (rawList.Count == 0)
         {
-            StatusBanner = "⚠️ 先に操作を記録してください。";
+            RecordingProgressText = "操作ログが記録されていません";
+            StatusBanner = "⚠️ 操作ログが記録されていません。";
             return;
         }
 
@@ -100,10 +101,48 @@ public sealed partial class MainViewModel
         ChunkAndFilterSummaryText = $"チャンク分割: {LastChunkCount}個 / 推定トークン: {LastEstimatedTokens} / フィルタ除外: {LastFilteredOutEventCount}件";
         RecordingProgressText = $"解析完了 ({rawList.Count}件 -> 有効候補{candidates.Count}件, {ChunkAndFilterSummaryText})";
 
+        var allowedOrigins = new List<OriginRule>();
+        var allowedExcelDirs = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(AllowedOriginHostInput))
+        {
+            TryRegisterHttpOrigin(AllowedOriginHostInput, allowedOrigins);
+        }
+        if (!string.IsNullOrWhiteSpace(AllowedExcelDirectoryInput))
+        {
+            TryRegisterExcelDirectory(AllowedExcelDirectoryInput, allowedExcelDirs);
+        }
+        if (!string.IsNullOrWhiteSpace(StepExcelPathInput))
+        {
+            TryRegisterExcelDirectory(StepExcelPathInput, allowedExcelDirs);
+        }
+
+        foreach (var ev in rawList)
+        {
+            TryRegisterHttpOrigin(ev.UrlOrWorkbookPath, allowedOrigins);
+            TryRegisterExcelDirectory(ev.UrlOrWorkbookPath, allowedExcelDirs);
+        }
+
+        foreach (var cand in candidates)
+        {
+            TryRegisterHttpOrigin(cand.TargetUrlOrWorkbook, allowedOrigins);
+            TryRegisterExcelDirectory(cand.TargetUrlOrWorkbook, allowedExcelDirs);
+        }
+
+        if (_liveBrowserDriver?.CurrentUrl is not null)
+        {
+            TryRegisterHttpOrigin(_liveBrowserDriver.CurrentUrl.ToString(), allowedOrigins);
+        }
+
+        bool allowCoordinateClick = AllowCoordinateClickPolicy ||
+            candidates.Any(c => c.Locator is not null && c.Locator.UsesCoordinatesOnly());
+
         var policy = new PolicyDeclaration
         {
-            AllowedOrigins = new List<OriginRule> { new() { Scheme = "https", Host = "example.com", Port = 443 } },
-            AllowExternalAi = AllowExternalAiPolicy
+            AllowedOrigins = allowedOrigins,
+            AllowCoordinateClick = allowCoordinateClick,
+            AllowExternalAi = AllowExternalAiPolicy,
+            AllowedExcelDirectories = allowedExcelDirs
         };
 
         if (_aiOrchestrator is not null)

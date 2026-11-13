@@ -383,7 +383,7 @@ public sealed partial class MultiLogExtractionEngine
         return MatchesAnySemanticIdentifier(cluster, current);
     }
 
-    private static bool AreTargetsCompatibleForMerge(
+    private bool AreTargetsCompatibleForMerge(
         EventCluster cluster,
         RawRecordedEvent current,
         bool requireExplicitMatchWhenBothHaveIdentity)
@@ -391,8 +391,8 @@ public sealed partial class MultiLogExtractionEngine
         if (cluster.IntentKind == "Navigate")
         {
             string? prevUrl = cluster.Events.Select(e => e.UrlOrWorkbookPath).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u));
-            return string.IsNullOrWhiteSpace(prevUrl) ||
-                   string.IsNullOrWhiteSpace(current.UrlOrWorkbookPath) ||
+            return !string.IsNullOrWhiteSpace(prevUrl) &&
+                   !string.IsNullOrWhiteSpace(current.UrlOrWorkbookPath) &&
                    string.Equals(prevUrl, current.UrlOrWorkbookPath, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -404,22 +404,61 @@ public sealed partial class MultiLogExtractionEngine
         // 双方が明確に離れたスクリーン座標を持つ場合は別箇所への操作として分離する
         if (current.CoordinateX.HasValue && current.CoordinateY.HasValue)
         {
-            var prevCoordEv = cluster.Events.FirstOrDefault(e => e.CoordinateX.HasValue && e.CoordinateY.HasValue);
-            if (prevCoordEv is not null &&
-                (Math.Abs(prevCoordEv.CoordinateX!.Value - current.CoordinateX.Value) > 30 ||
-                 Math.Abs(prevCoordEv.CoordinateY!.Value - current.CoordinateY.Value) > 30) &&
-                !MatchesAnySemanticIdentifier(cluster, current))
+            var prevCoordEvents = cluster.Events.Where(e => e.CoordinateX.HasValue && e.CoordinateY.HasValue).ToList();
+            if (prevCoordEvents.Any(prev =>
+                Math.Abs(prev.CoordinateX!.Value - current.CoordinateX.Value) > 30 ||
+                Math.Abs(prev.CoordinateY!.Value - current.CoordinateY.Value) > 30))
             {
                 return false;
             }
         }
 
+        if (!AreInputValuesCompatibleForMerge(cluster, current))
+        {
+            return false;
+        }
+
         bool clusterHasSemanticId = cluster.Events.Any(HasAnySemanticIdentity);
         bool currentHasSemanticId = HasAnySemanticIdentity(current);
 
-        // 片方がOS入力フック等の座標・生打鍵のみで意味的識別子を持たない場合は補完関係としてマージ許可
         if (!clusterHasSemanticId || !currentHasSemanticId)
         {
+            TimeSpan elapsed = (current.Timestamp - cluster.LastTimestamp).Duration();
+            if (elapsed > _options.CrossSourceCorrelationWindow)
+            {
+                return false;
+            }
+
+            // 同一ログソースが既に存在する場合は別操作イベントとして分離する
+            bool sameSourceExists = cluster.Events.Any(e =>
+                string.Equals(e.LogSource, current.LogSource, StringComparison.OrdinalIgnoreCase));
+            if (sameSourceExists)
+            {
+                return false;
+            }
+
+            if (!clusterHasSemanticId && !currentHasSemanticId)
+            {
+                if (!current.CoordinateX.HasValue || !current.CoordinateY.HasValue)
+                {
+                    return false;
+                }
+
+                return cluster.Events.Any(e =>
+                    e.CoordinateX.HasValue && e.CoordinateY.HasValue &&
+                    Math.Abs(e.CoordinateX.Value - current.CoordinateX.Value) <= 30 &&
+                    Math.Abs(e.CoordinateY.Value - current.CoordinateY.Value) <= 30);
+            }
+
+            // 既に高信頼ソースで確定済みのクラスタに後続の意味的識別子なしイベントを混入させない
+            if (clusterHasSemanticId && !currentHasSemanticId &&
+                cluster.Events.Any(e =>
+                    string.Equals(e.LogSource, LogSourceConstants.BrowserDom, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(e.LogSource, LogSourceConstants.CustomAppHook, StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
             return true;
         }
 
@@ -433,6 +472,32 @@ public sealed partial class MultiLogExtractionEngine
                    cluster.Events.Select(e => e.TargetRole).FirstOrDefault(r => !string.IsNullOrWhiteSpace(r)),
                    current.TargetRole) &&
                !HasConflictingNamedIdentifiers(cluster, current);
+    }
+
+    private static bool AreInputValuesCompatibleForMerge(EventCluster cluster, RawRecordedEvent current)
+    {
+        if (string.IsNullOrEmpty(current.CapturedValue))
+        {
+            return true;
+        }
+
+        var prevValues = cluster.Events
+            .Select(e => e.CapturedValue)
+            .Where(v => !string.IsNullOrEmpty(v))
+            .Cast<string>()
+            .ToList();
+
+        if (prevValues.Count == 0)
+        {
+            return true;
+        }
+
+        string lastVal = prevValues[^1];
+        string currVal = current.CapturedValue;
+
+        return string.Equals(lastVal, currVal, StringComparison.Ordinal) ||
+               currVal.StartsWith(lastVal, StringComparison.Ordinal) ||
+               lastVal.StartsWith(currVal, StringComparison.Ordinal);
     }
 
     private static bool AreRolesCompatible(string? roleA, string? roleB)

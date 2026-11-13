@@ -27,25 +27,73 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
         ct.ThrowIfCancellationRequested();
 
         var allowedOrigins = new List<OriginRule>(policy.AllowedOrigins);
+        var allowedExcelDirs = new List<string>(policy.AllowedExcelDirectories);
         var children = new List<WorkflowNode>();
         int idx = 1;
 
+        string? activeBrowserUrl = candidates
+            .Where(c => c.SuggestedActionType.StartsWith("Chrome.", StringComparison.Ordinal))
+            .Select(c => c.TargetUrlOrWorkbook)
+            .FirstOrDefault(u => !string.IsNullOrWhiteSpace(u) && Uri.TryCreate(u, UriKind.Absolute, out _));
+
+        if (string.IsNullOrWhiteSpace(activeBrowserUrl) && allowedOrigins.Count > 0)
+        {
+            var firstOrigin = allowedOrigins[0];
+            string portPart = (firstOrigin.Scheme == "https" && firstOrigin.Port == 443) ||
+                              (firstOrigin.Scheme == "http" && firstOrigin.Port == 80)
+                ? string.Empty
+                : $":{firstOrigin.Port}";
+            activeBrowserUrl = $"{firstOrigin.Scheme}://{firstOrigin.Host}{portPart}";
+        }
+
+        string? activeWorkbookPath = candidates
+            .Where(c => c.SuggestedActionType.StartsWith("Excel.", StringComparison.Ordinal))
+            .Select(c => c.TargetUrlOrWorkbook)
+            .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p));
+
+        string? activeSheetName = candidates
+            .Where(c => c.SuggestedActionType.StartsWith("Excel.", StringComparison.Ordinal))
+            .Select(c => c.SheetName)
+            .FirstOrDefault(s => !string.IsNullOrWhiteSpace(s));
+
+        string? activeRangeAddress = candidates
+            .Where(c => c.SuggestedActionType.StartsWith("Excel.", StringComparison.Ordinal))
+            .Select(c => c.RangeAddress)
+            .FirstOrDefault(r => !string.IsNullOrWhiteSpace(r));
+
+        string? activeCustomAppName = candidates
+            .Where(c => c.SuggestedActionType.StartsWith("CustomApp.", StringComparison.Ordinal))
+            .Select(c => c.TargetUrlOrWorkbook)
+            .FirstOrDefault(a => !string.IsNullOrWhiteSpace(a));
+
         foreach (var cand in candidates)
         {
-            // Chrome操作候補のURLオリジンをすべて許可リストへ自動登録する
             if (cand.SuggestedActionType.StartsWith("Chrome.", StringComparison.Ordinal) &&
-                !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) &&
-                Uri.TryCreate(cand.TargetUrlOrWorkbook, UriKind.Absolute, out Uri? candUri) &&
-                (candUri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
-                 candUri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)) &&
-                !allowedOrigins.Any(o => o.Matches(candUri)))
+                !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook))
             {
-                allowedOrigins.Add(new OriginRule
+                activeBrowserUrl = cand.TargetUrlOrWorkbook;
+                TryAddOriginRule(activeBrowserUrl, allowedOrigins);
+            }
+            else if (cand.SuggestedActionType.StartsWith("Excel.", StringComparison.Ordinal))
+            {
+                if (!string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook))
                 {
-                    Scheme = candUri.Scheme,
-                    Host = candUri.Host,
-                    Port = candUri.IsDefaultPort ? (candUri.Scheme == "https" ? 443 : 80) : candUri.Port
-                });
+                    activeWorkbookPath = cand.TargetUrlOrWorkbook;
+                    TryAddExcelDirectory(activeWorkbookPath, allowedExcelDirs);
+                }
+                if (!string.IsNullOrWhiteSpace(cand.SheetName))
+                {
+                    activeSheetName = cand.SheetName;
+                }
+                if (!string.IsNullOrWhiteSpace(cand.RangeAddress))
+                {
+                    activeRangeAddress = cand.RangeAddress;
+                }
+            }
+            else if (cand.SuggestedActionType.StartsWith("CustomApp.", StringComparison.Ordinal) &&
+                     !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook))
+            {
+                activeCustomAppName = cand.TargetUrlOrWorkbook;
             }
 
             string nodeId = $"step-{idx++}";
@@ -53,20 +101,11 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
             {
                 case IrConstants.ActionChromeNavigate:
                 {
-                    string url = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
-                        ? "https://example.com"
-                        : cand.TargetUrlOrWorkbook;
+                    string url = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeBrowserUrl ?? string.Empty);
 
-                    if (Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) &&
-                        !allowedOrigins.Any(o => o.Matches(uri)))
-                    {
-                        allowedOrigins.Add(new OriginRule
-                        {
-                            Scheme = uri.Scheme,
-                            Host = uri.Host,
-                            Port = uri.IsDefaultPort ? (uri.Scheme == "https" ? 443 : 80) : uri.Port
-                        });
-                    }
+                    TryAddOriginRule(url, allowedOrigins);
 
                     children.Add(new WorkflowNode
                     {
@@ -80,6 +119,7 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                 }
                 case IrConstants.ActionChromeFill:
                 {
+                    string fallbackLabel = !string.IsNullOrWhiteSpace(activeBrowserUrl) ? activeBrowserUrl : "textbox";
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -88,8 +128,8 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new ChromeFillArgs
                         {
-                            Locator = cand.Locator ?? new SemanticLocator { Label = "入力欄" },
-                            Value = string.IsNullOrEmpty(cand.SanitizedValue) ? "サンプル入力" : cand.SanitizedValue,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "textbox", Label = fallbackLabel, AccessibleName = fallbackLabel },
+                            Value = cand.SanitizedValue ?? string.Empty,
                             IsSensitive = cand.IsSensitive
                         })
                     });
@@ -97,6 +137,7 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                 }
                 case IrConstants.ActionChromeClick:
                 {
+                    string fallbackName = !string.IsNullOrWhiteSpace(activeBrowserUrl) ? activeBrowserUrl : "button";
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -105,13 +146,25 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new ChromeClickArgs
                         {
-                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = "確認" }
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = fallbackName, Label = fallbackName }
                         })
                     });
                     break;
                 }
                 case IrConstants.ActionExcelReadRange:
                 {
+                    string workbookPath = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeWorkbookPath ?? string.Empty);
+                    string sheetName = !string.IsNullOrWhiteSpace(cand.SheetName)
+                        ? cand.SheetName
+                        : (activeSheetName ?? string.Empty);
+                    string rangeAddr = !string.IsNullOrWhiteSpace(cand.RangeAddress)
+                        ? cand.RangeAddress
+                        : (activeRangeAddress ?? "A1");
+
+                    TryAddExcelDirectory(workbookPath, allowedExcelDirs);
+
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -120,30 +173,22 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new ExcelReadRangeArgs
                         {
-                            WorkbookPath = cand.TargetUrlOrWorkbook ?? Path.Combine(Path.GetTempPath(), "MacroSample.xlsx"),
-                            SheetName = cand.SheetName ?? "Sheet1",
-                            RangeAddress = cand.RangeAddress ?? "A1:B2"
+                            WorkbookPath = workbookPath,
+                            SheetName = sheetName,
+                            RangeAddress = rangeAddr
                         })
                     });
                     break;
                 }
                 case IrConstants.ActionChromeSubmit:
                 {
-                    string destUrl = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
-                        ? "https://example.com/submit"
-                        : cand.TargetUrlOrWorkbook;
+                    string destUrl = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeBrowserUrl ?? string.Empty);
 
-                    if (Uri.TryCreate(destUrl, UriKind.Absolute, out Uri? uri) &&
-                        !allowedOrigins.Any(o => o.Matches(uri)))
-                    {
-                        allowedOrigins.Add(new OriginRule
-                        {
-                            Scheme = uri.Scheme,
-                            Host = uri.Host,
-                            Port = uri.IsDefaultPort ? (uri.Scheme == "https" ? 443 : 80) : uri.Port
-                        });
-                    }
+                    TryAddOriginRule(destUrl, allowedOrigins);
 
+                    string fallbackName = !string.IsNullOrWhiteSpace(destUrl) ? destUrl : "submit";
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -152,18 +197,29 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new ChromeSubmitArgs
                         {
-                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = "送信" },
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = fallbackName, Label = fallbackName },
                             DestinationUrl = destUrl,
-                            ExpectedSuccessSelector = "#submit-success"
+                            ExpectedSuccessSelector = cand.Locator?.CssSelector ?? "#submit-success"
                         })
                     });
                     break;
                 }
                 case IrConstants.ActionExcelWriteRange:
                 {
-                    string rangeAddr = cand.RangeAddress ?? "A1:A1";
-                    string valText = cand.SanitizedValue ?? "自動記録データ";
+                    string workbookPath = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeWorkbookPath ?? string.Empty);
+                    string sheetName = !string.IsNullOrWhiteSpace(cand.SheetName)
+                        ? cand.SheetName
+                        : (activeSheetName ?? string.Empty);
+                    string rangeAddr = !string.IsNullOrWhiteSpace(cand.RangeAddress)
+                        ? cand.RangeAddress
+                        : (activeRangeAddress ?? "A1");
+                    string valText = cand.SanitizedValue ?? string.Empty;
                     var parsedRows = ParseMatrixForRange(valText, rangeAddr);
+
+                    TryAddExcelDirectory(workbookPath, allowedExcelDirs);
+
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -172,8 +228,8 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new ExcelWriteRangeArgs
                         {
-                            WorkbookPath = cand.TargetUrlOrWorkbook ?? Path.Combine(Path.GetTempPath(), "MacroSample.xlsx"),
-                            SheetName = cand.SheetName ?? "Sheet1",
+                            WorkbookPath = workbookPath,
+                            SheetName = sheetName,
                             RangeAddress = rangeAddr,
                             Values = parsedRows
                         })
@@ -182,6 +238,9 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                 }
                 case IrConstants.ActionCustomAppClick:
                 {
+                    string appName = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeCustomAppName ?? cand.Locator?.Label ?? cand.Locator?.AccessibleName ?? string.Empty);
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -190,14 +249,17 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new CustomAppClickArgs
                         {
-                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
-                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = "実行" }
+                            ApplicationName = appName,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "button", AccessibleName = appName, Label = appName }
                         })
                     });
                     break;
                 }
                 case IrConstants.ActionCustomAppFill:
                 {
+                    string appName = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeCustomAppName ?? cand.Locator?.Label ?? cand.Locator?.AccessibleName ?? string.Empty);
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -206,9 +268,9 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new CustomAppFillArgs
                         {
-                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
-                            Locator = cand.Locator ?? new SemanticLocator { Role = "textbox", Label = "入力項目" },
-                            Value = string.IsNullOrEmpty(cand.SanitizedValue) ? "自動入力値" : cand.SanitizedValue,
+                            ApplicationName = appName,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "textbox", Label = appName, AccessibleName = appName },
+                            Value = cand.SanitizedValue ?? string.Empty,
                             IsSensitive = cand.IsSensitive
                         })
                     });
@@ -216,6 +278,9 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                 }
                 case IrConstants.ActionCustomAppReadText:
                 {
+                    string appName = !string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook)
+                        ? cand.TargetUrlOrWorkbook
+                        : (activeCustomAppName ?? cand.Locator?.Label ?? cand.Locator?.AccessibleName ?? string.Empty);
                     children.Add(new WorkflowNode
                     {
                         NodeId = nodeId,
@@ -224,8 +289,8 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
                         SourceCandidateIds = new List<string> { cand.CandidateId },
                         Args = JsonSerializer.SerializeToElement(new CustomAppReadTextArgs
                         {
-                            ApplicationName = string.IsNullOrWhiteSpace(cand.TargetUrlOrWorkbook) ? "基幹業務システム" : cand.TargetUrlOrWorkbook,
-                            Locator = cand.Locator ?? new SemanticLocator { Role = "text", Label = "ステータス" }
+                            ApplicationName = appName,
+                            Locator = cand.Locator ?? new SemanticLocator { Role = "text", Label = appName, AccessibleName = appName }
                         })
                     });
                     break;
@@ -233,17 +298,8 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
             }
         }
 
-        if (children.Count == 0)
-        {
-            allowedOrigins.Add(new OriginRule { Scheme = "https", Host = "example.com", Port = 443 });
-            children.Add(new WorkflowNode
-            {
-                NodeId = "step-1",
-                Type = IrConstants.NodeTypeAction,
-                ActionType = IrConstants.ActionChromeNavigate,
-                Args = JsonSerializer.SerializeToElement(new ChromeNavigateArgs { Url = "https://example.com" })
-            });
-        }
+        bool allowCoordClick = policy.AllowCoordinateClick ||
+            candidates.Any(c => c.Locator is not null && c.Locator.UsesCoordinatesOnly());
 
         var wf = new WorkflowDefinition
         {
@@ -254,9 +310,9 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
             Policy = new PolicyDeclaration
             {
                 AllowedOrigins = allowedOrigins,
-                AllowCoordinateClick = policy.AllowCoordinateClick,
+                AllowCoordinateClick = allowCoordClick,
                 AllowExternalAi = policy.AllowExternalAi,
-                AllowedExcelDirectories = policy.AllowedExcelDirectories
+                AllowedExcelDirectories = allowedExcelDirs
             },
             Root = new WorkflowNode
             {
@@ -268,6 +324,50 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
 
         string json = JsonSerializer.Serialize(wf, new JsonSerializerOptions { WriteIndented = true });
         return Task.FromResult(json);
+    }
+
+    private static void TryAddOriginRule(string? rawUrl, List<OriginRule> allowedOrigins)
+    {
+        if (string.IsNullOrWhiteSpace(rawUrl)) return;
+        if (Uri.TryCreate(rawUrl.Trim(), UriKind.Absolute, out Uri? uri) &&
+            (uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) ||
+             uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)) &&
+            !string.IsNullOrWhiteSpace(uri.Host) &&
+            !allowedOrigins.Any(o => o.Matches(uri)))
+        {
+            string scheme = uri.Scheme.ToLowerInvariant();
+            allowedOrigins.Add(new OriginRule
+            {
+                Scheme = scheme,
+                Host = uri.Host,
+                Port = uri.IsDefaultPort ? (scheme == "https" ? 443 : 80) : uri.Port
+            });
+        }
+    }
+
+    private static void TryAddExcelDirectory(string? workbookPath, List<string> allowedExcelDirs)
+    {
+        if (string.IsNullOrWhiteSpace(workbookPath)) return;
+        string trimmed = workbookPath.Trim();
+        if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        try
+        {
+            string fullPath = Path.GetFullPath(trimmed);
+            string? dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrWhiteSpace(dir) &&
+                !allowedExcelDirs.Any(d => string.Equals(d, dir, StringComparison.OrdinalIgnoreCase)))
+            {
+                allowedExcelDirs.Add(dir);
+            }
+        }
+        catch
+        {
+        }
     }
 
     private static List<List<string>> ParseMatrixForRange(string text, string rangeAddress)
@@ -290,7 +390,7 @@ public sealed class LocalBuiltInAiProvider : IAiProvider
             {
                 string cell = (r < rawLines.Count && c < rawLines[r].Count)
                     ? rawLines[r][c]
-                    : (rawLines.Count > 0 && rawLines[0].Count > 0 ? rawLines[0][0] : "データ");
+                    : (rawLines.Count > 0 && rawLines[0].Count > 0 ? rawLines[0][0] : string.Empty);
                 row.Add(cell);
             }
             matrix.Add(row);

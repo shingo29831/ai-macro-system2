@@ -1,6 +1,7 @@
 // Module: @role: EasyStepItemとWorkflow IRノード間の相互変換およびノード引数生成を担当するPartialクラス
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using AiMacroSystem.Application;
@@ -180,7 +181,37 @@ public sealed partial class MainViewModel
     private void RebuildIrJsonFromEasySteps()
     {
         var origins = new List<OriginRule>();
+        var excelDirs = new List<string>();
         var children = new List<WorkflowNode>();
+
+        if (!string.IsNullOrWhiteSpace(EditorIrJson))
+        {
+            try
+            {
+                var prevDef = JsonSerializer.Deserialize<WorkflowDefinition>(EditorIrJson);
+                if (prevDef?.Policy is not null)
+                {
+                    foreach (var prevOrigin in prevDef.Policy.AllowedOrigins)
+                    {
+                        if (!origins.Any(o =>
+                            string.Equals(o.Scheme, prevOrigin.Scheme, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(o.Host, prevOrigin.Host, StringComparison.OrdinalIgnoreCase) &&
+                            o.Port == prevOrigin.Port))
+                        {
+                            origins.Add(prevOrigin);
+                        }
+                    }
+
+                    foreach (var prevDir in prevDef.Policy.AllowedExcelDirectories)
+                    {
+                        TryRegisterExcelDirectory(prevDir, excelDirs);
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
 
         int num = 1;
         int total = EasySteps.Count;
@@ -197,37 +228,61 @@ public sealed partial class MainViewModel
                 if (item.ActionType == IrConstants.ActionChromeNavigate)
                 {
                     var nav = item.UnderlyingNode.Args.Value.Deserialize<ChromeNavigateArgs>();
-                    StepBlockFormatter.TryRegisterOrigin(nav?.Url, origins);
+                    TryRegisterHttpOrigin(nav?.Url, origins);
                 }
                 else if (item.ActionType == IrConstants.ActionChromeSubmit)
                 {
                     var sub = item.UnderlyingNode.Args.Value.Deserialize<ChromeSubmitArgs>();
-                    StepBlockFormatter.TryRegisterOrigin(sub?.DestinationUrl, origins);
+                    TryRegisterHttpOrigin(sub?.DestinationUrl, origins);
+                }
+                else if (item.ActionType == IrConstants.ActionExcelReadRange)
+                {
+                    var read = item.UnderlyingNode.Args.Value.Deserialize<ExcelReadRangeArgs>();
+                    TryRegisterExcelDirectory(read?.WorkbookPath, excelDirs);
+                }
+                else if (item.ActionType == IrConstants.ActionExcelWriteRange)
+                {
+                    var write = item.UnderlyingNode.Args.Value.Deserialize<ExcelWriteRangeArgs>();
+                    TryRegisterExcelDirectory(write?.WorkbookPath, excelDirs);
                 }
             }
+
+            foreach (var tracedEv in _workflowService.TraceNodeToRawEvents(item.UnderlyingNode))
+            {
+                TryRegisterHttpOrigin(tracedEv.UrlOrWorkbookPath, origins);
+                TryRegisterExcelDirectory(tracedEv.UrlOrWorkbookPath, excelDirs);
+            }
+        }
+
+        foreach (var rawEv in _recordingService.GetRecordedEvents())
+        {
+            TryRegisterHttpOrigin(rawEv.UrlOrWorkbookPath, origins);
+            TryRegisterExcelDirectory(rawEv.UrlOrWorkbookPath, excelDirs);
         }
 
         if (_liveBrowserDriver?.CurrentUrl is not null)
         {
-            StepBlockFormatter.TryRegisterOrigin(_liveBrowserDriver.CurrentUrl.ToString(), origins);
+            TryRegisterHttpOrigin(_liveBrowserDriver.CurrentUrl.ToString(), origins);
         }
 
-        if (origins.Count == 0)
+        if (!string.IsNullOrWhiteSpace(AllowedOriginHostInput))
         {
-            origins.Add(new OriginRule { Scheme = "https", Host = "example.com", Port = 443 });
-            origins.Add(new OriginRule { Scheme = "https", Host = "www.google.com", Port = 443 });
+            TryRegisterHttpOrigin(AllowedOriginHostInput, origins);
         }
 
-        if (!string.IsNullOrWhiteSpace(AllowedOriginHostInput) &&
-            !origins.Any(o => string.Equals(o.Host, AllowedOriginHostInput.Trim(), StringComparison.OrdinalIgnoreCase)))
+        if (!string.IsNullOrWhiteSpace(StepUrlInput) && origins.Count == 0)
         {
-            origins.Add(new OriginRule { Scheme = "https", Host = AllowedOriginHostInput.Trim(), Port = 443 });
+            TryRegisterHttpOrigin(StepUrlInput, origins);
         }
 
-        var excelDirs = new List<string>();
         if (!string.IsNullOrWhiteSpace(AllowedExcelDirectoryInput))
         {
-            excelDirs.Add(AllowedExcelDirectoryInput.Trim());
+            TryRegisterExcelDirectory(AllowedExcelDirectoryInput, excelDirs);
+        }
+
+        if (!string.IsNullOrWhiteSpace(StepExcelPathInput))
+        {
+            TryRegisterExcelDirectory(StepExcelPathInput, excelDirs);
         }
 
         var def = new WorkflowDefinition
@@ -333,5 +388,88 @@ public sealed partial class MainViewModel
             SourceLogSummary = sourceLogSummary,
             HasNextBlock = hasNextBlock
         };
+    }
+
+    private static void TryRegisterHttpOrigin(string? rawUrlOrHost, List<OriginRule> origins)
+    {
+        if (string.IsNullOrWhiteSpace(rawUrlOrHost)) return;
+        string trimmed = rawUrlOrHost.Trim();
+
+        if (!Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri) ||
+            (!uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) &&
+             !uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)))
+        {
+            if (trimmed.Contains('.', StringComparison.Ordinal) &&
+                !trimmed.Contains('\\', StringComparison.Ordinal) &&
+                !trimmed.Contains(' ', StringComparison.Ordinal) &&
+                !trimmed.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) &&
+                !trimmed.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase) &&
+                !trimmed.EndsWith(".xls", StringComparison.OrdinalIgnoreCase) &&
+                !trimmed.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) &&
+                Uri.TryCreate($"https://{trimmed}", UriKind.Absolute, out Uri? httpsUri))
+            {
+                uri = httpsUri;
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(uri.Host)) return;
+
+        string scheme = uri.Scheme.ToLowerInvariant();
+        int port = uri.IsDefaultPort ? (scheme == "https" ? 443 : 80) : uri.Port;
+
+        if (!origins.Any(o =>
+            string.Equals(o.Scheme, scheme, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(o.Host, uri.Host, StringComparison.OrdinalIgnoreCase) &&
+            o.Port == port))
+        {
+            origins.Add(new OriginRule
+            {
+                Scheme = scheme,
+                Host = uri.Host,
+                Port = port
+            });
+        }
+    }
+
+    private static void TryRegisterExcelDirectory(string? rawPath, List<string> excelDirs)
+    {
+        if (string.IsNullOrWhiteSpace(rawPath)) return;
+        string trimmed = rawPath.Trim();
+        if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string ext = Path.GetExtension(trimmed);
+        bool isExcelFile = ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase) ||
+                           ext.Equals(".xlsm", StringComparison.OrdinalIgnoreCase) ||
+                           ext.Equals(".xls", StringComparison.OrdinalIgnoreCase) ||
+                           ext.Equals(".csv", StringComparison.OrdinalIgnoreCase);
+
+        if (!isExcelFile && !Path.IsPathRooted(trimmed))
+        {
+            return;
+        }
+
+        try
+        {
+            string fullPath = Path.GetFullPath(trimmed);
+            string? dir = isExcelFile || Path.HasExtension(fullPath)
+                ? Path.GetDirectoryName(fullPath)
+                : fullPath;
+            if (!string.IsNullOrWhiteSpace(dir) &&
+                !excelDirs.Any(d => string.Equals(d, dir, StringComparison.OrdinalIgnoreCase)))
+            {
+                excelDirs.Add(dir);
+            }
+        }
+        catch
+        {
+        }
     }
 }
