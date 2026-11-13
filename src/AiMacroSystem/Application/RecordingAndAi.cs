@@ -374,7 +374,7 @@ public sealed class AiOrchestrator
             userApprovedExternalAi,
             scopedRawEvents,
             ct);
-        _logStore?.WriteSessionSummary(scopedRawEvents, candidates, outcome);
+        _logStore?.WriteSessionSummary(sessionRawEvents ?? scopedRawEvents, candidates, outcome);
         return outcome;
     }
 

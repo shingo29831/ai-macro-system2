@@ -97,7 +97,7 @@ public sealed partial class MainViewModel
             ? _logStore.FilterRecentEvents(rawList)
             : rawList;
 
-        var (candidates, chunks) = _normalizationService.NormalizeAndChunk(recentRawList);
+        var (candidates, chunks) = _normalizationService.NormalizeAndChunk(rawList);
         var filterSummary = _normalizationService.LastFilterSummary;
         LastChunkCount = Math.Max(1, chunks.Count);
         LastEstimatedTokens = filterSummary?.FilteredEstimatedTokens ?? TokenEstimator.EstimateTotalTokens(candidates);
@@ -156,7 +156,7 @@ public sealed partial class MainViewModel
                 policy,
                 AllowExternalAiPolicy,
                 default,
-                recentRawList);
+                rawList);
             LastChunkCount = Math.Max(LastChunkCount, outcome.TotalChunksCount);
             if (outcome.EstimatedTokens > 0) LastEstimatedTokens = outcome.EstimatedTokens;
             LastFilteredOutEventCount = Math.Max(LastFilteredOutEventCount, outcome.FilteredOutEventCount);
